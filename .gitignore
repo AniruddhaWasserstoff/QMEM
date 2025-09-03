@@ -1,5 +1,9 @@
 .qmem/
-# Python build artifacts
+# Ignore build artifacts
 dist/
 build/
 *.egg-info/
+
+# Ignore egg-info specifically inside src
+src/qmem.egg-info/
+
