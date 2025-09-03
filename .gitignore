@@ -1,9 +1,10 @@
-.qmem/
-# Ignore build artifacts
+# Build artifacts
 dist/
 build/
 *.egg-info/
-
-# Ignore egg-info specifically inside src
 src/qmem.egg-info/
 
+# Local secrets/config (recommended)
+.qmem/
+.env
+*.env
