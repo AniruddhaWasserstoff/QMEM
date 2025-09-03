@@ -8,3 +8,10 @@ src/qmem.egg-info/
 .qmem/
 .env
 *.env
+dist/
+build/
+*.egg-info/
+src/qmem.egg-info/
+.qmem/
+.env
+*.env
