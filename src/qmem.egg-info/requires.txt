@@ -1,0 +1,15 @@
+qdrant-client>=1.7.0
+pydantic>=2.6
+typer>=0.12
+rich>=13.7
+tomlkit>=0.12
+questionary>=2.0
+
+[minilm]
+sentence-transformers>=2.6
+
+[minilm:platform_machine != "wasm32"]
+torch>=2
+
+[openai]
+openai>=1.30.0

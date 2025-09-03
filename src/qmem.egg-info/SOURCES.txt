@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+src/qmem/__init__.py
+src/qmem/api.py
+src/qmem/cli.py
+src/qmem/client.py
+src/qmem/config.py
+src/qmem/embedder.py
+src/qmem/py.typed
+src/qmem/schemas.py
+src/qmem.egg-info/PKG-INFO
+src/qmem.egg-info/SOURCES.txt
+src/qmem.egg-info/dependency_links.txt
+src/qmem.egg-info/entry_points.txt
+src/qmem.egg-info/requires.txt
+src/qmem.egg-info/top_level.txt
