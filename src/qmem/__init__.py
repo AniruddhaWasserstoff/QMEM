@@ -53,7 +53,7 @@ try:
     __version__: str = _metadata.version("qmem")
 except _metadata.PackageNotFoundError:
     # Fallback for editable/local use
-    __version__ = "0.0.8"
+    __version__ = "0.0.9"
 
 # -----------------------------
 # Defaults & state

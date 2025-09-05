@@ -27,9 +27,7 @@ print(table)
 
 table = qm.retrieve_filter(
     query="space travel",
-    filter_json={
-        "must": [{"key": "genre", "match": {"value": "Adventure"}}]
-    },
+    filter_json=latest.json,
     top_k=3,
 )
 print(table)
