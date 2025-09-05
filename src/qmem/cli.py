@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set
@@ -14,10 +15,13 @@ from rich.prompt import IntPrompt, Prompt
 from rich.table import Table
 
 from .client import QMem
-from .config import CONFIG_PATH, QMemConfig
+from .config import CONFIG_PATH, QMemConfig, FILTERS_DIR
 from .schemas import IngestItem
+from . import format_results_table  # shared table formatter
 
-app = typer.Typer(help="qmem — simple Qdrant wrapper for ingestion & retrieval")
+__all__ = ["app"]
+
+app = typer.Typer(help="qmem — Memory for ingestion & retrieval")
 console = Console()
 
 # -----------------------------
@@ -88,6 +92,170 @@ def _truncate(s: object, limit: int = 80) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+# New: default annotation helpers
+def _used_default(val, default) -> bool:
+    """Treat value as default if equal to the default."""
+    return val == default
+
+
+def _ann(val, default) -> str:
+    """Render ' (default)' suffix when value equals default."""
+    return " (default)" if _used_default(val, default) else ""
+
+
+# New: save filters for reuse
+def _save_filter_to_file(filter_obj: dict, name: Optional[str] = None) -> Path:
+    """
+    Save filter JSON to ./.qmem/filters/<name>.json.
+    If name is omitted/blank, uses 'latest.json'.
+    """
+    FILTERS_DIR.mkdir(parents=True, exist_ok=True)
+    filename = (name or "latest").strip() or "latest"
+    # sanitize: allow alnum, dash, underscore
+    safe = "".join(c for c in filename if c.isalnum() or c in ("-", "_")).rstrip(".")
+    path = FILTERS_DIR / f"{safe}.json"
+    path.write_text(json.dumps(filter_obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+# -----------------------------
+# Filter Builder helpers
+# -----------------------------
+
+def _ask_condition(group_name: str) -> dict:
+    ctype = qs.select(
+        f"[{group_name}] Pick condition type:",
+        choices=[
+            "match (exact)",
+            "match-any (array)",
+            "range (gte/lte/gt/lt)",
+            "is_null",
+            "exists",
+            "has_id",
+            "geo_radius",
+            "geo_bounding_box",
+        ],
+        pointer="➤",
+        use_shortcuts=False,
+    ).ask()
+
+    if ctype == "match (exact)":
+        key = Prompt.ask("Key")
+        val = Prompt.ask("Value (exact)")
+        return {"key": key, "match": {"value": val}}
+
+    if ctype == "match-any (array)":
+        key = Prompt.ask("Key")
+        raw = Prompt.ask("Values (comma-separated)")
+        vals = [s.strip() for s in raw.split(",") if s.strip()]
+        return {"key": key, "match": {"any": vals}}
+
+    if ctype == "range (gte/lte/gt/lt)":
+        key = Prompt.ask("Key")
+        gte = Prompt.ask("gte (blank=skip)", default="", show_default=False)
+        lte = Prompt.ask("lte (blank=skip)", default="", show_default=False)
+        gt = Prompt.ask("gt (blank=skip)", default="", show_default=False)
+        lt = Prompt.ask("lt (blank=skip)", default="", show_default=False)
+        rng: Dict[str, object] = {}
+        if gte != "":
+            try:
+                rng["gte"] = float(gte)
+            except Exception:
+                rng["gte"] = gte
+        if lte != "":
+            try:
+                rng["lte"] = float(lte)
+            except Exception:
+                rng["lte"] = lte
+        if gt != "":
+            try:
+                rng["gt"] = float(gt)
+            except Exception:
+                rng["gt"] = gt
+        if lt != "":
+            try:
+                rng["lt"] = float(lt)
+            except Exception:
+                rng["lt"] = lt
+        return {"key": key, "range": rng}
+
+    if ctype == "is_null":
+        key = Prompt.ask("Key")
+        return {"is_null": {"key": key}}
+
+    if ctype == "exists":
+        key = Prompt.ask("Key")
+        return {"has_field": {"key": key}}
+
+    if ctype == "has_id":
+        raw = Prompt.ask("IDs (comma-separated)")
+        ids = [s.strip() for s in raw.split(",") if s.strip()]
+        return {"has_id": {"values": ids}}
+
+    if ctype == "geo_radius":
+        key = Prompt.ask("Key (payload field with {lat,lon})")
+        lat = float(Prompt.ask("center.lat"))
+        lon = float(Prompt.ask("center.lon"))
+        radius = float(Prompt.ask("radius (meters)"))
+        return {"key": key, "geo_radius": {"center": {"lat": lat, "lon": lon}, "radius": radius}}
+
+    if ctype == "geo_bounding_box":
+        key = Prompt.ask("Key (payload field with {lat,lon})")
+        tl = Prompt.ask("top_left lat,lon (e.g. 40.73,-74.10)")
+        br = Prompt.ask("bottom_right lat,lon (e.g. 40.01,-71.12)")
+        tl_lat, tl_lon = [float(x.strip()) for x in tl.split(",")]
+        br_lat, br_lon = [float(x.strip()) for x in br.split(",")]
+        return {
+            "key": key,
+            "geo_bounding_box": {
+                "top_left": {"lat": tl_lat, "lon": tl_lon},
+                "bottom_right": {"lat": br_lat, "lon": br_lon},
+            },
+        }
+
+    return {}
+
+
+def _build_filter_interactive() -> dict:
+    filter_obj: Dict[str, list] = {}
+
+    groups = qs.checkbox(
+        "Choose groups to include (space to toggle):",
+        choices=[
+            qs.Choice("must", checked=True),
+            qs.Choice("should", checked=False),
+            qs.Choice("must_not", checked=False),
+        ],
+    ).ask()
+
+    def ask_group(name: str) -> None:
+        n = IntPrompt.ask(f"How many conditions in {name.upper()}?", default=0)
+        if n <= 0:
+            return
+        conds = []
+        for i in range(1, n + 1):
+            conds.append(_ask_condition(name.upper()))
+        filter_obj[name] = conds
+
+    if "must" in groups:
+        ask_group("must")
+    if "must_not" in groups:
+        ask_group("must_not")
+    if "should" in groups:
+        ask_group("should")
+        if "should" in filter_obj and filter_obj["should"]:
+            ms_default = 1
+            ms = IntPrompt.ask("Minimum number of SHOULD to match", default=ms_default)
+            filter_obj["min_should"] = ms
+            console.print(f"[dim]min_should = {ms}{_ann(ms, ms_default)}[/dim]")
+
+    console.print("Preview filter →", style="bold")
+    console.print_json(data=filter_obj)
+    yn = Prompt.ask("Run with this filter? (y/N)", default="y")
+    if (yn or "").lower().startswith("y"):
+        return filter_obj
+    return _build_filter_interactive()  # restart wizard to re-edit
+
 # -----------------------------
 # init
 # -----------------------------
@@ -99,7 +267,7 @@ def init_cmd() -> None:
 
     console.print("qmem init — set keys and choose embedding model", style="bold")
     openai_key = Prompt.ask(
-        "OpenAI API key (leave empty if using MiniLM)",
+        "OpenAI API key (leave empty if using MiniLM on Hugging Face)",
         default="",
         show_default=False,
         password=True,
@@ -113,23 +281,26 @@ def init_cmd() -> None:
         choices=[
             "text-embedding-3-small (OpenAI, 1536)",
             "text-embedding-3-large (OpenAI, 3072)",
-            "MiniLM sentence-transformer (HF, 384)",
+            "MiniLM (Hugging Face API, 384)",
         ],
         pointer="➤",
         use_shortcuts=False,
     ).ask()
 
+    hf_key = ""
     if model_choice and model_choice.startswith("text-embedding-3-small"):
         provider, model, default_dim = "openai", "text-embedding-3-small", 1536
     elif model_choice and model_choice.startswith("text-embedding-3-large"):
         provider, model, default_dim = "openai", "text-embedding-3-large", 3072
     else:
         provider, model, default_dim = "minilm", "sentence-transformers/all-MiniLM-L6-v2", 384
+        hf_key = Prompt.ask("Hugging Face API key (required for MiniLM via HF)", password=True)
 
     dim = IntPrompt.ask("Embedding dimension", default=default_dim)
 
     cfg = QMemConfig(
         openai_api_key=(openai_key or None),
+        hf_api_key=(hf_key or None),
         qdrant_url=qdrant_url,
         qdrant_api_key=qdrant_key,
         embed_provider=provider,
@@ -238,33 +409,28 @@ def ingest(
         _fail(f"Invalid embed field: {embed_field!r}. Choose one of: {', '.join(candidates) if candidates else '[]'}")
 
     payload_keys = _parse_payload_keys(
-        payload or Prompt.ask("payload fields (comma-separated, empty = all except embedded)", default="")
+        payload or Prompt.ask("payload fields (comma-separated, empty = keep all fields)", default="")
     )
 
     # Construct items; each record uses the SAME embed_field (unless vector is present)
     items: List[IngestItem] = []
     for d in records:
-        known = {
-            "vector": d.get("vector"),  # if present, will be used directly
-            "embed_field": embed_field,
-            "graph": d.get("graph"),
-            "tags": d.get("tags"),
-        }
+        # Start with a pass-through of the whole record (flat)
+        known = dict(d)
 
-        # Ensure the selected embed_field is available at top-level
+        # Ensure control field exists/override
+        known["embed_field"] = embed_field
+
+        # Ensure the selected embed_field text is present at top-level if available
         if embed_field in d:
             known[embed_field] = d[embed_field]
 
-        # Also copy common text fields if present
-        for k in ("query", "response", "sql_query", "doc_id"):
+        # Convenience keys (may already exist; that's fine)
+        for k in ("query", "response", "sql_query", "doc_id", "graph", "tags"):
             if k in d:
                 known[k] = d[k]
 
-        # Extra payload keys (anything not already in known)
-        extras = {k: v for k, v in d.items() if k not in known}
-        if extras:
-            known["extra"] = extras
-
+        known.pop("extra", None)
         items.append(IngestItem(**known))
 
     # Keep the embedded field text in payload as well
@@ -292,9 +458,11 @@ def retrieve(
     _ensure_collection_exists(q, collection)
 
     if not query:
-        query = Prompt.ask("query:")
+        query = Prompt.ask("query")
     if k is None:
-        k = IntPrompt.ask("top_k:", default=5)
+        k_default = 5
+        k = IntPrompt.ask("top_k:", default=k_default)
+        console.print(f"[dim]Run options → top_k = {k}{_ann(k, k_default)}[/dim]")
 
     results = q.search(query, top_k=k)
 
@@ -316,3 +484,170 @@ def retrieve(
         table.add_row(*row)
 
     console.print(table)
+
+
+# -----------------------------
+# Friendly Qdrant 400 parsing
+# -----------------------------
+
+_INDEX_ERR_RE = re.compile(
+    r'Index required but not found for\s+\\"(?P<field>[^"]+)\\"\s+of one of the following types:\s+\[(?P<types>[^\]]+)\]',
+    re.IGNORECASE,
+)
+
+def _maybe_hint_create_index(error_msg: str) -> None:
+    m = _INDEX_ERR_RE.search(error_msg or "")
+    if not m:
+        return
+    field = m.group("field").strip()
+    types = [t.strip().lower() for t in m.group("types").split(",")]
+    # Map qdrant type hint -> CLI choice
+    # qdrant may say 'keyword','integer','float','bool'
+    console.print(
+        "\n[yellow]Hint[/yellow]: Qdrant needs a payload index to filter on this field.\n"
+        f"Run: [bold]qmem index[/bold] and add field [bold]{field}[/bold] with type "
+        f"[bold]{' / '.join(types)}[/bold]."
+    )
+
+
+# -----------------------------
+# NEW: filter (payload-only, no score column)
+# -----------------------------
+
+@app.command("filter", help="Filter payload (no vector search) — interactive builder")
+def filter_cmd() -> None:
+    cfg = QMemConfig.load(CONFIG_PATH)
+    collection = Prompt.ask("collection_name")
+    q = QMem(cfg, collection=collection)
+    _ensure_collection_exists(q, collection)
+
+    filter_json = _build_filter_interactive()
+    limit_default = 100
+    limit = IntPrompt.ask("Limit", default=limit_default)
+    console.print(f"[dim]Run options → limit = {limit}{_ann(limit, limit_default)}[/dim]")
+
+    # Ask to save for reuse
+    yn_save = Prompt.ask("Save this filter for reuse? (y/N)", default="y")
+    if (yn_save or "").lower().startswith("y"):
+        default_name = "latest"
+        name = Prompt.ask("Filter name (stored under .qmem/filters/)", default=default_name)
+        saved_path = _save_filter_to_file(filter_json, name)
+        console.print(f"[green]Saved filter[/green] → {saved_path}")
+
+    try:
+        results, _ = q.scroll_filter(query_filter=filter_json, limit=limit)
+    except Exception as e:
+        msg = str(e)
+        console.print(f"[red]Request failed:[/red] {msg}")
+        _maybe_hint_create_index(msg)
+        raise typer.Exit(code=2)
+
+    # Render WITHOUT score column (uses shared table formatter)
+    console.print(format_results_table(results, show_score=False))
+
+
+# -----------------------------
+# NEW: retrieve_filter (hybrid, no score column)
+# -----------------------------
+
+@app.command("retrieve_filter", help="Vector search scoped by a payload filter — interactive builder")
+def retrieve_filter_cmd() -> None:
+    cfg = QMemConfig.load(CONFIG_PATH)
+    collection = Prompt.ask("collection_name")
+    q = QMem(cfg, collection=collection)
+    _ensure_collection_exists(q, collection)
+
+    query = Prompt.ask("query")
+    topk_default = 5
+    topk = IntPrompt.ask("top_k:", default=topk_default)
+    console.print(f"[dim]Run options → top_k = {topk}{_ann(topk, topk_default)}[/dim]")
+
+    filter_json = _build_filter_interactive()
+
+    # Ask to save for reuse
+    yn_save = Prompt.ask("Save this filter for reuse? (y/N)", default="y")
+    if (yn_save or "").lower().startswith("y"):
+        default_name = "latest"
+        name = Prompt.ask("Filter name (stored under .qmem/filters/)", default=default_name)
+        saved_path = _save_filter_to_file(filter_json, name)
+        console.print(f"[green]Saved filter[/green] → {saved_path}")
+
+    try:
+        results = q.search_filtered(query, top_k=topk, query_filter=filter_json)
+    except Exception as e:
+        msg = str(e)
+        console.print(f"[red]Request failed:[/red] {msg}")
+        _maybe_hint_create_index(msg)
+        raise typer.Exit(code=2)
+
+    # Render WITHOUT score column (uses shared table formatter)
+    console.print(format_results_table(results, show_score=False))
+
+
+# -----------------------------
+# NEW: index (interactive payload index creation)
+# -----------------------------
+
+@app.command("index", help="Create payload indexes (interactive)")
+def index_cmd() -> None:
+    """
+    Interactively create Qdrant payload indexes for fields you plan to filter on.
+    Types supported here: keyword | integer | float | bool
+
+    Example flow:
+      qmem index
+      collection_name: WASD
+      Field name (blank to finish): genre
+      Index type: keyword
+      Field name (blank to finish): year
+      Index type: integer
+      Field name (blank to finish): [ENTER]
+    """
+    cfg = QMemConfig.load(CONFIG_PATH)
+    collection = Prompt.ask("collection_name")
+    q = QMem(cfg, collection=collection)
+    _ensure_collection_exists(q, collection)
+
+    console.print("Add fields to index. Leave name empty to finish.", style="bold")
+
+    schema: Dict[str, qmodels.PayloadSchemaType] = {}
+    type_map = {
+        "keyword": qmodels.PayloadSchemaType.KEYWORD,
+        "integer": qmodels.PayloadSchemaType.INTEGER,
+        "float": qmodels.PayloadSchemaType.FLOAT,
+        "bool": qmodels.PayloadSchemaType.BOOL,
+    }
+
+    while True:
+        fname = Prompt.ask("Field name (blank to finish)", default="", show_default=False).strip()
+        if not fname:
+            break
+        itype = qs.select(
+            f"Index type for '{fname}':",
+            choices=["keyword", "integer", "float", "bool"],
+            pointer="➤",
+            use_shortcuts=False,
+        ).ask()
+        schema[fname] = type_map[itype]
+
+    if not schema:
+        _fail("No fields provided.")
+
+    created = []
+    for field, ftype in schema.items():
+        try:
+            q.client.create_payload_index(
+                collection_name=collection,
+                field_name=field,
+                field_schema=ftype,
+                wait=True,
+            )
+            created.append(field)
+        except Exception as e:
+            # If already exists or other recoverable cases, just log
+            console.print(f"[yellow]Skipped[/yellow] {field}: {e}")
+
+    if created:
+        console.print(f"[green]Created/verified indexes[/green] on {collection}: {', '.join(created)}")
+    else:
+        console.print(f"[yellow]No new indexes created[/yellow] on {collection}.")

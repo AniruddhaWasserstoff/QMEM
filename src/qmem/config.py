@@ -8,8 +8,32 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 import tomlkit as toml
 
+__all__ = ["QMemConfig", "CONFIG_DIR", "CONFIG_PATH", "FILTERS_DIR"]
+
+# ---------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------
+
 CONFIG_DIR = Path(".qmem")
 CONFIG_PATH = CONFIG_DIR / "config.toml"
+FILTERS_DIR = CONFIG_DIR / "filters"  # new: where saved filter JSONs live
+
+# Environment variable names
+_ENV = {
+    "qdrant_url": "QMEM_QDRANT_URL",
+    "qdrant_api_key": "QMEM_QDRANT_API_KEY",
+    "openai_api_key": "QMEM_OPENAI_API_KEY",
+    "hf_api_key": "QMEM_HF_API_KEY",
+    "embed_provider": "QMEM_EMBED_PROVIDER",
+    "embed_model": "QMEM_EMBED_MODEL",
+    "embed_dim": "QMEM_EMBED_DIM",
+    "default_collection": "QMEM_DEFAULT_COLLECTION",
+}
+
+
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
 
 
 def _mask(value: Optional[str], keep: int = 4) -> str:
@@ -22,6 +46,11 @@ def _mask(value: Optional[str], keep: int = 4) -> str:
     return f"{v[:keep]}…{'*' * 4}"
 
 
+# ---------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------
+
+
 class QMemConfig(BaseModel):
     """
     App configuration (service endpoints, keys, embedding settings).
@@ -30,6 +59,7 @@ class QMemConfig(BaseModel):
       - QMEM_QDRANT_URL
       - QMEM_QDRANT_API_KEY
       - QMEM_OPENAI_API_KEY
+      - QMEM_HF_API_KEY
       - QMEM_EMBED_PROVIDER  (openai|minilm)
       - QMEM_EMBED_MODEL
       - QMEM_EMBED_DIM
@@ -41,6 +71,10 @@ class QMemConfig(BaseModel):
     qdrant_api_key: str = Field(..., description="Qdrant API key")
     openai_api_key: Optional[str] = Field(
         default=None, description="OpenAI API key (if using OpenAI embeddings)"
+    )
+    hf_api_key: Optional[str] = Field(
+        default=None,
+        description="Hugging Face API key (if using hosted MiniLM via HF Inference API)",
     )
 
     # Embeddings
@@ -61,6 +95,7 @@ class QMemConfig(BaseModel):
             f"qdrant_url={self.qdrant_url!r}, "
             f"qdrant_api_key={_mask(self.qdrant_api_key)!r}, "
             f"openai_api_key={_mask(self.openai_api_key)!r}, "
+            f"hf_api_key={_mask(self.hf_api_key)!r}, "
             f"embed_provider={self.embed_provider!r}, "
             f"embed_model={self.embed_model!r}, "
             f"embed_dim={self.embed_dim!r}, "
@@ -75,6 +110,7 @@ class QMemConfig(BaseModel):
         d = self.model_dump()
         d["qdrant_api_key"] = _mask(self.qdrant_api_key)
         d["openai_api_key"] = _mask(self.openai_api_key)
+        d["hf_api_key"] = _mask(self.hf_api_key)
         return d
 
     # -----------------------
@@ -94,29 +130,19 @@ class QMemConfig(BaseModel):
             # toml.parse returns a TOMLDocument (dict-like). That's fine for our merge.
             data = dict(toml.parse(path.read_text(encoding="utf-8")))
 
-        # Apply environment overrides if present
-        env_map = {
-            "qdrant_url": os.getenv("QMEM_QDRANT_URL"),
-            "qdrant_api_key": os.getenv("QMEM_QDRANT_API_KEY"),
-            "openai_api_key": os.getenv("QMEM_OPENAI_API_KEY"),
-            "embed_provider": os.getenv("QMEM_EMBED_PROVIDER"),
-            "embed_model": os.getenv("QMEM_EMBED_MODEL"),
-            "embed_dim": os.getenv("QMEM_EMBED_DIM"),
-            "default_collection": os.getenv("QMEM_DEFAULT_COLLECTION"),
-        }
-
-        # Merge: env > file (ignore empty strings)
+        # Apply environment overrides if present (env > file; ignore empty strings)
         merged = {**data}
-        for k, v in env_map.items():
+        for field, env_name in _ENV.items():
+            v = os.getenv(env_name)
             if v is not None and v != "":
-                merged[k] = v
+                merged[field] = v
 
         # If file missing AND required fields absent, guide user to init.
         required = ("qdrant_url", "qdrant_api_key", "embed_provider", "embed_model", "embed_dim")
         if not path.exists() and any(k not in merged for k in required):
             raise FileNotFoundError(f"Config not found at {path}. Run `qmem init` in this folder.")
 
-        # Normalize empty strings to None for optional fields
+        # Normalize empty strings to None for optional fields (e.g., API keys)
         cleaned = {k: (v if v != "" else None) for k, v in merged.items()}
 
         # Pydantic will coerce embed_dim to int if it's a str from env.
@@ -133,6 +159,7 @@ class QMemConfig(BaseModel):
         doc.add("qdrant_url", self.qdrant_url)
         doc.add("qdrant_api_key", self.qdrant_api_key)
         doc.add("openai_api_key", self.openai_api_key or "")
+        doc.add("hf_api_key", self.hf_api_key or "")
         doc.add("embed_provider", self.embed_provider)
         doc.add("embed_model", self.embed_model)
         doc.add("embed_dim", int(self.embed_dim))

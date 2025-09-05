@@ -2,20 +2,27 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Set, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Union
 
 from qdrant_client import models as qmodels
 
 from .client import QMem
 from .config import CONFIG_PATH, QMemConfig
-from .schemas import IngestItem
+from .schemas import IngestItem, RetrievalResult
 
+__all__ = [
+    "create",
+    "ingest",
+    "ingest_from_file",
+    "retrieve",
+    "retrieve_by_filter",
+]
 
 # -----------------------------
 # Internals
 # -----------------------------
 
-_DISTANCE = {
+_DISTANCE: Dict[str, qmodels.Distance] = {
     "cosine": qmodels.Distance.COSINE,
     "dot": qmodels.Distance.DOT,
     "euclid": qmodels.Distance.EUCLID,
@@ -33,31 +40,30 @@ def _items(records: Iterable[dict], embed_field: Optional[str]) -> List[IngestIt
     """
     Convert raw dict records into IngestItem objects.
 
-    - Keeps the chosen `embed_field` at top-level (so the client can embed it).
-    - Copies common text fields when present (query/response/sql_query/doc_id).
-    - Remaining keys are placed under `extra`.
+    Flat payload behavior:
+      - Keep ALL original keys flat at top level (no 'extra' wrapper).
+      - Ensure the chosen `embed_field` is present at top level when available.
+      - Convenience fields (query/response/sql_query/doc_id/graph/tags) pass through if present.
     """
     items: List[IngestItem] = []
     for d in records:
-        known = {
-            "vector": d.get("vector"),
-            "embed_field": embed_field,
-            "graph": d.get("graph"),
-            "tags": d.get("tags"),
-        }
+        # Start with pass-through of the whole record (flat)
+        known = dict(d)
+
+        # Control field for which key to embed
+        known["embed_field"] = embed_field
+
         # Ensure the embed text is available at top-level for the client
         if embed_field and embed_field in d:
             known[embed_field] = d[embed_field]
 
-        # Copy well-known text fields if provided
-        for k in ("query", "response", "sql_query", "doc_id"):
+        # Convenience keys (may already exist; that's fine)
+        for k in ("query", "response", "sql_query", "doc_id", "graph", "tags"):
             if k in d:
                 known[k] = d[k]
 
-        # Everything else -> extra
-        extra = {k: v for k, v in d.items() if k not in known}
-        if extra:
-            known["extra"] = extra
+        # IMPORTANT: Do NOT create/keep 'extra'
+        known.pop("extra", None)
 
         items.append(IngestItem(**known))
     return items
@@ -91,24 +97,48 @@ def create(
     """
     Create a collection in Qdrant if it doesn't already exist.
 
+    Behavior:
+      - If `dim` is provided, it overrides `cfg.embed_dim`, is persisted to config,
+        and both the collection vector size and embedder dimension will use this value.
+      - If `dim` is omitted, falls back to `cfg.embed_dim` (or 1536 if unset).
+
     Args:
         collection: Collection name.
         cfg: Optional QMemConfig; loaded from CONFIG_PATH if not provided.
-        dim: Vector size; falls back to cfg.embed_dim or 1536.
+        dim: Vector size; overrides and persists cfg.embed_dim when provided.
         distance: "cosine" | "dot" | "euclid" (or qmodels.Distance).
     """
     cfg = cfg or QMemConfig.load(CONFIG_PATH)
+
+    # Resolve vector dimension and persist override if provided
+    if dim is None:
+        vec_dim = cfg.embed_dim or 1536
+    else:
+        vec_dim = int(dim)
+        if cfg.embed_dim != vec_dim:
+            cfg.embed_dim = vec_dim
+            cfg.save(CONFIG_PATH)  # persist so the embedder and future ops match
+
+    # Normalize distance
+    if isinstance(distance, str):
+        key = distance.strip().lower()
+        if key not in _DISTANCE:
+            raise ValueError(f"Invalid distance: {distance!r}. Choose from: {', '.join(_DISTANCE)}")
+        dist = _DISTANCE[key]
+    else:
+        dist = distance
+
+    # Build client AFTER cfg.embed_dim may have been updated, so embedder matches
     q = QMem(cfg, collection=collection)
 
+    # If the collection already exists, nothing to do
     try:
-        q.client.get_collection(collection)  # exists -> no-op
+        q.client.get_collection(collection)
         return
     except Exception:
         pass
 
-    dist = _DISTANCE[distance] if isinstance(distance, str) else distance
-    vec_dim = dim if dim is not None else (cfg.embed_dim or 1536)
-
+    # Create with the resolved dimension & distance
     q.ensure_collection(
         create_if_missing=True,
         distance=dist,
@@ -133,8 +163,8 @@ def ingest(
         records: Iterable of dict rows.
         embed_field: Field whose text to embed (required unless row has 'vector').
         cfg: Optional QMemConfig; loaded if not provided.
-        payload_keys: Fields to store in payload; None = keep all except embedded field.
-        include_embed_in_payload: Also keep the embedded field in payload.
+        payload_keys: Fields to store in payload; None = keep ALL fields (flat).
+        include_embed_in_payload: Also keep the embedded field in payload (if True).
 
     Returns:
         Number of upserted items.
@@ -171,8 +201,8 @@ def ingest_from_file(
         path: File path (.jsonl or .json).
         embed_field: Field whose text to embed (required).
         cfg: Optional QMemConfig.
-        payload_keys: Fields to store in payload; None = keep all except embedded field.
-        include_embed_in_payload: Also keep the embedded field in payload.
+        payload_keys: Fields to store in payload; None = keep ALL fields (flat).
+        include_embed_in_payload: Also keep the embedded field in payload (if True).
 
     Returns:
         Number of upserted items.
@@ -197,7 +227,7 @@ def retrieve(
     *,
     k: int = 5,
     cfg: Optional[QMemConfig] = None,
-):
+) -> List[RetrievalResult]:
     """
     Vector search for top-k results.
 
@@ -217,3 +247,28 @@ def retrieve(
     q = QMem(cfg, collection=collection)
     q.client.get_collection(collection)  # ensure exists
     return q.search(query, top_k=k)
+
+
+def retrieve_by_filter(
+    collection: str,
+    *,
+    filter: Union[dict, qmodels.Filter],
+    k: int = 100,
+    query: Optional[str] = None,
+    cfg: Optional[QMemConfig] = None,
+) -> List[RetrievalResult]:
+    """
+    Hybrid (query + filter) when `query` is provided; otherwise payload-only scroll.
+
+    Returns:
+        list[RetrievalResult] (first page up to k items).
+    """
+    cfg = cfg or QMemConfig.load(CONFIG_PATH)
+    q = QMem(cfg, collection=collection)
+    q.client.get_collection(collection)  # ensure exists
+
+    if query:
+        return q.search_filtered(query, top_k=k, query_filter=filter)
+
+    results, _ = q.scroll_filter(query_filter=filter, limit=k)
+    return results

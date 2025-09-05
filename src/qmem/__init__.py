@@ -14,11 +14,12 @@ Public API:
 from __future__ import annotations
 
 from importlib import metadata as _metadata
-from typing import Iterable, Optional, Union
+from pathlib import Path
+from typing import Iterable, List, Optional, Sequence, Union
 
 # Core low-level client & models
 from .client import QMem
-from .config import QMemConfig
+from .config import QMemConfig, FILTERS_DIR
 from .schemas import IngestItem, RetrievalResult
 
 # Low-level API functions (used by module-level helpers)
@@ -27,6 +28,7 @@ from .api import (
     ingest as _api_ingest,
     ingest_from_file as _api_ingest_from_file,
     retrieve as _api_retrieve,
+    retrieve_by_filter as _api_retrieve_by_filter,
 )
 
 __all__ = (
@@ -37,6 +39,8 @@ __all__ = (
     "create",
     "ingest",
     "retrieve",
+    "filter",
+    "retrieve_filter",
     "format_results_table",
     "__version__",
 )
@@ -49,7 +53,7 @@ try:
     __version__: str = _metadata.version("qmem")
 except _metadata.PackageNotFoundError:
     # Fallback for editable/local use
-    __version__ = "0.0.6"
+    __version__ = "0.0.9"
 
 # -----------------------------
 # Defaults & state
@@ -70,45 +74,94 @@ def _ensure_collection_set(name: Optional[str]) -> str:
     return _DEFAULT_COLLECTION
 
 
+def _resolve_filter_arg(filter_arg: Union[dict, str, Path]) -> dict:
+    """
+    Accepts:
+      - dict (returned as-is)
+      - str/Path:
+          * absolute/relative JSON path, or
+          * short name 'myfilter' resolving to ./.qmem/filters/myfilter.json
+    """
+    if isinstance(filter_arg, dict):
+        return filter_arg
+
+    if isinstance(filter_arg, (str, Path)):
+        p = Path(filter_arg)
+        # If it's a bare name (no suffix and not an explicit path), map to FILTERS_DIR/name.json
+        if not p.suffix and not str(p).startswith(("/", "./", "../")):
+            p = FILTERS_DIR / f"{p}.json"
+        if not p.exists():
+            raise FileNotFoundError(f"Filter file not found: {p}")
+        text = p.read_text(encoding="utf-8")
+        import json as _json
+        obj = _json.loads(text)
+        if not isinstance(obj, dict):
+            raise ValueError(f"Filter file must contain a JSON object: {p}")
+        return obj
+
+    raise TypeError("filter_json must be a dict, a path string, or a Path")
+
+
 # -----------------------------
 # Pretty table formatter
 # -----------------------------
 def format_results_table(
-    results,
+    results: Sequence[RetrievalResult],
     *,
     max_query_len: int = 75,
     max_resp_len: int = 60,
+    show_score: bool = True,
 ) -> str:
-    """Build a Unicode table with columns: # | score | query | response."""
+    """Build a Unicode table. Set show_score=False to hide the score column."""
     def trunc(s: Optional[str], n: int) -> str:
         s = "" if s is None else str(s)
         return s if len(s) <= n else s[: n - 1] + "…"
 
-    header = ["#", "score", "query", "response"]
-    w0 = max(2, len(header[0]))
-    w1 = max(5, len(header[1]))
-    w2 = max(75, len(header[2]), max_query_len)
-    w3 = max(60, len(header[3]), max_resp_len)
+    if show_score:
+        header = ["#", "score", "query", "response"]
+        w0, w1, w2, w3 = 2, 5, max(75, max_query_len), max(60, max_resp_len)
+        top = f"┌{'─'*w0}┬{'─'*w1}┬{'─'*w2}┬{'─'*w3}┐"
+        mid = f"├{'─'*w0}┼{'─'*w1}┼{'─'*w2}┼{'─'*w3}┤"
+        bot = f"└{'─'*w0}┴{'─'*w1}┴{'─'*w2}┴{'─'*w3}┘"
 
-    top = f"┌{'─'*w0}┬{'─'*w1}┬{'─'*w2}┬{'─'*w3}┐"
-    mid = f"├{'─'*w0}┼{'─'*w1}┼{'─'*w2}┼{'─'*w3}┤"
-    bot = f"└{'─'*w0}┴{'─'*w1}┴{'─'*w2}┴{'─'*w3}┘"
+        def row(a, b, c, d) -> str:
+            return (
+                f"│{str(a).rjust(w0)}"
+                f"│{str(b).rjust(w1)}"
+                f"│{str(c).ljust(w2)}"
+                f"│{str(d).ljust(w3)}│"
+            )
 
-    def row(a, b, c, d) -> str:
+        lines = [top, row(*header), mid]
+        for i, r in enumerate(results, 1):
+            score = f"{getattr(r, 'score', 0):.4f}"
+            payload = getattr(r, "payload", {}) or {}
+            q = trunc(payload.get("query"), max_query_len)       # strictly 'query'
+            resp = trunc(payload.get("response"), max_resp_len)  # strictly 'response'
+            lines.append(row(i, score, q, resp))
+        lines.append(bot)
+        return "\n".join(lines)
+
+    # show_score == False
+    header = ["#", "query", "response"]
+    w0, w2, w3 = 2, max(75, max_query_len), max(60, max_resp_len)
+    top = f"┌{'─'*w0}┬{'─'*w2}┬{'─'*w3}┐"
+    mid = f"├{'─'*w0}┼{'─'*w2}┼{'─'*w3}┤"
+    bot = f"└{'─'*w0}┴{'─'*w2}┴{'─'*w3}┘"
+
+    def row(a, c, d) -> str:
         return (
             f"│{str(a).rjust(w0)}"
-            f"│{str(b).rjust(w1)}"
             f"│{str(c).ljust(w2)}"
             f"│{str(d).ljust(w3)}│"
         )
 
     lines = [top, row(*header), mid]
     for i, r in enumerate(results, 1):
-        score = f"{getattr(r, 'score', 0):.4f}"
         payload = getattr(r, "payload", {}) or {}
-        q = trunc(payload.get("query"), max_query_len)       # strictly 'query'
-        resp = trunc(payload.get("response"), max_resp_len)  # strictly 'response'
-        lines.append(row(i, score, q, resp))
+        q = trunc(payload.get("query"), max_query_len)
+        resp = trunc(payload.get("response"), max_resp_len)
+        lines.append(row(i, q, resp))
     lines.append(bot)
     return "\n".join(lines)
 
@@ -188,6 +241,7 @@ def ingest(
 
     raise ValueError("Provide either file= path or records=[...]")
 
+
 def retrieve(
     *,
     query: str,
@@ -195,7 +249,7 @@ def retrieve(
     collection_name: Optional[str] = None,
     as_table: bool = True,
     cfg: Optional[QMemConfig] = None,
-):
+) -> Union[str, List[RetrievalResult]]:
     """
     qm.retrieve(query="...", top_k=5)
 
@@ -209,3 +263,42 @@ def retrieve(
     coll = _ensure_collection_set(collection_name)
     results = _api_retrieve(coll, query, k=top_k, cfg=cfg)
     return format_results_table(results) if as_table else results
+
+
+def filter(
+    *,
+    filter_json: Union[dict, str, Path],
+    limit: int = 100,
+    collection_name: Optional[str] = None,
+    as_table: bool = True,
+    cfg: Optional[QMemConfig] = None,
+) -> Union[str, List[RetrievalResult]]:
+    """
+    qm.filter(filter_json={...} | 'latest' | 'path/to/file.json', limit=100)
+    Payload-only results by default; prints a table WITHOUT the score column.
+    """
+    coll = _ensure_collection_set(collection_name)
+    filt = _resolve_filter_arg(filter_json)
+    results = _api_retrieve_by_filter(coll, filter=filt, k=limit, query=None, cfg=cfg)
+    return format_results_table(results, show_score=False) if as_table else results
+
+
+def retrieve_filter(
+    *,
+    query: str,
+    filter_json: Union[dict, str, Path],
+    top_k: int = 5,
+    collection_name: Optional[str] = None,
+    as_table: bool = True,
+    cfg: Optional[QMemConfig] = None,
+) -> Union[str, List[RetrievalResult]]:
+    """
+    qm.retrieve_filter(query, filter_json={...} | 'latest' | 'path/to/file.json', top_k=5)
+    Hybrid search; prints a table WITHOUT the score column by default.
+    """
+    if not query:
+        raise ValueError("query is required")
+    coll = _ensure_collection_set(collection_name)
+    filt = _resolve_filter_arg(filter_json)
+    results = _api_retrieve_by_filter(coll, filter=filt, k=top_k, query=query, cfg=cfg)
+    return format_results_table(results, show_score=False) if as_table else results

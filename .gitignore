@@ -1,17 +1,57 @@
-# Build artifacts
-dist/
-build/
+# ---------------------
+# Python
+# ---------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pkl
 *.egg-info/
-src/qmem.egg-info/
+.eggs/
+*.so
+*.log
+*.sqlite3
 
-# Local secrets/config (recommended)
-.qmem/
-.env
-*.env
-dist/
+# ---------------------
+# Environments
+# ---------------------
+.venv/
+.venv*/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# ---------------------
+# IDE / Editor
+# ---------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---------------------
+# Project-specific
+# ---------------------
+
+# Local qmem state (don’t commit secrets or filters)
+.qmem/config.toml
+.qmem/filters/*.json
+
+# Local data / scratch
+data/
+tmp/
+*.jsonl
+*.json
+*.csv
+*.tsv
+
+# ---------------------
+# Packaging / Build
+# ---------------------
 build/
-*.egg-info/
-src/qmem.egg-info/
-.qmem/
-.env
-*.env
+dist/
+*.egg
+*.whl
+*.tar.gz
