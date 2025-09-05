@@ -4,23 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qmem"
-version = "0.0.6"
-description = "memory library for seamless data ingestion, storage, and retrieval with customizable embedding models."
-readme = "README.md"
+version = "0.0.8"
+description = "Memory library for seamless data ingestion, storage, and retrieval with customizable embedding models."
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Aniruddha", email = "aniruddhabolakhe2907@gmail.com" }]
 
-dependencies = [
-  "qdrant-client>=1.7.0",
-  "pydantic>=2.6",
-  "typer>=0.12",
-  "rich>=13.7",
-  "tomlkit>=0.12",
-  "questionary>=2.0",
-]
-
-keywords = ["qdrant", "vector-db", "rag", "embeddings", "retrieval"]
+keywords = ["vector-db", "rag", "embeddings", "retrieval"]
 
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -36,14 +27,22 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 
-# optional backends: install only what you need
-[project.optional-dependencies]
-openai = [
+dependencies = [
+  "qdrant-client>=1.7.0",
+  "pydantic>=2.6",
+  "typer>=0.12",
+  "rich>=13.7",
+  "tomlkit>=0.12",
+  "questionary>=2.0",
   "openai>=1.30.0",
+  "huggingface_hub>=0.24",
 ]
+
+# Optional backends: install only what you need
+[project.optional-dependencies]
 minilm = [
   "sentence-transformers>=2.6",
-  # Torch CPU wheels index; users with CUDA can install their own variant
+  # Torch CPU wheels; users with CUDA can install their own variant
   "torch>=2; platform_machine != 'wasm32'",
 ]
 
@@ -58,3 +57,27 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "qmem" = ["py.typed"]
+
+# -------------------------
+# Developer tooling (optional)
+# -------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+lint.select = ["E", "F", "I", "UP", "B", "PIE"]
+lint.ignore = [
+  "E501",  # handled by Black
+]
+extend-exclude = ["dist", "build", ".venv"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39"]
+
+[tool.mypy]
+python_version = "3.9"
+strict = false
+warn_unused_configs = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]

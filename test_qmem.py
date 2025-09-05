@@ -1,13 +1,13 @@
 import qmem as qm
 
 # Create a collection
-qm.create(collection_name="qwerty", dim=1536, distance_metric="cosine")
+qm.create(collection_name="abc", dim=1024, distance_metric="cosine")
 
-# Ingest data from a file
+# Ingest data from a fill
 qm.ingest(
     file="/home/aniruddha/Desktop/qmem/data.jsonl",
-    embed_field="response",
-    payload_field="query,response",  # optional, keep these fields in payload
+    embed_field="query", # optional, keep these fields in payload
+    
 )
 
 # Retrieve results (pretty table by default)

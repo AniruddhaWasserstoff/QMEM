@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
-
-# Which field in each record is allowed to be embedded
-EmbedField = Literal["query", "response", "sql_query", "doc_id"]
 
 
 class IngestItem(BaseModel):
@@ -14,14 +11,14 @@ class IngestItem(BaseModel):
 
     Notes:
       - The actual embedded text is taken from `embed_field`.
-      - Validation is intentionally lenient here; strict checks happen in QMem.ingest().
-      - CLI/API may place unknown input keys under `extra` before model creation.
+      - `embed_field` can be ANY key present on the record (no fixed whitelist).
+      - Unknown keys are allowed and pass through into the payload (flat payload behavior).
     """
 
-    # Pydantic v2: ignore unknown fields (extras are handled by the caller)
-    model_config = ConfigDict(extra="ignore")
+    # Pydantic v2: allow unknown fields to pass through onto the model
+    model_config = ConfigDict(extra="allow")
 
-    # Optional text fields your records may contain
+    # Optional text fields your records may contain (common conveniences)
     query: Optional[str] = None
     response: Optional[str] = None
     sql_query: Optional[str] = None
@@ -30,17 +27,17 @@ class IngestItem(BaseModel):
     # Arbitrary graph/payload metadata
     graph: Optional[Dict[str, Any]] = None
     tags: Optional[Any] = None
-    extra: Optional[Dict[str, Any]] = None
+    extra: Optional[Dict[str, Any]] = None  # harmless; unused now
 
-    # Which of the above fields to embed
-    embed_field: EmbedField = "response"
+    # Which field to embed (NOW: any field name allowed)
+    embed_field: str = "response"
 
     @field_validator("embed_field")
     @classmethod
     def _ensure_embed_present(cls, v: str, info: ValidationInfo) -> str:
         """
         Soft-check that the chosen embed field exists on the instance.
-        We do not fail here; ingest() will enforce non-empty text later.
+        We do not fail here; client.ingest() will enforce non-empty text later.
         """
         _ = (getattr(info, "data", {}) or {}).get(v)
         return v
@@ -50,4 +47,4 @@ class RetrievalResult(BaseModel):
     """Typed wrapper for search results."""
     id: str
     score: float
-    payload: Dict[str, Any]
+    payload: Mapping[str, Any]

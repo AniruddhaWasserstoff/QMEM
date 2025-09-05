@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging as log
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 from uuid import uuid4
 
 from qdrant_client import QdrantClient, models as qmodels
@@ -10,12 +10,17 @@ from .config import QMemConfig
 from .embedder import build_embedder
 from .schemas import IngestItem, RetrievalResult
 
+__all__ = ["QMem"]
+
 logger = log.getLogger(__name__)
 
 
 class QMem:
     """Minimal client for ingest & retrieval against a single Qdrant collection."""
 
+    # -----------------------------
+    # Init
+    # -----------------------------
     def __init__(self, cfg: QMemConfig, collection: Optional[str] = None) -> None:
         """
         Args:
@@ -35,7 +40,6 @@ class QMem:
     # ---------------------------------------------------------------------
     # Collection management
     # ---------------------------------------------------------------------
-
     def ensure_collection(
         self,
         *,
@@ -71,9 +75,63 @@ class QMem:
         )
 
     # ---------------------------------------------------------------------
+    # Payload index helpers
+    # ---------------------------------------------------------------------
+    _INDEX_TYPE_MAP: Dict[str, qmodels.PayloadSchemaType] = {
+        "keyword": qmodels.PayloadSchemaType.KEYWORD,
+        "integer": qmodels.PayloadSchemaType.INTEGER,
+        "int": qmodels.PayloadSchemaType.INTEGER,
+        "float": qmodels.PayloadSchemaType.FLOAT,
+        "double": qmodels.PayloadSchemaType.FLOAT,
+        "bool": qmodels.PayloadSchemaType.BOOL,
+        "boolean": qmodels.PayloadSchemaType.BOOL,
+    }
+
+    def create_payload_index(self, field_name: str, field_type: str) -> None:
+        """
+        Create a single payload index on `field_name` of type in
+        {"keyword","integer","float","bool"} (case-insensitive).
+
+        Safe to call repeatedly; will no-op if the index already exists (errors are ignored).
+        """
+        name = self._require_collection()
+        tkey = (field_type or "").strip().lower()
+        schema = self._INDEX_TYPE_MAP.get(tkey)
+        if not schema:
+            raise ValueError(
+                f"Unsupported index type {field_type!r} for field {field_name!r}. "
+                f"Use one of: keyword, integer, float, bool"
+            )
+        try:
+            self.client.create_payload_index(
+                collection_name=name,
+                field_name=field_name,
+                field_schema=schema,
+                wait=True,
+            )
+            logger.info("Created payload index: %s (%s)", field_name, tkey)
+        except Exception as e:
+            # Already exists / race conditions -> ignore, keep quiet in normal operation
+            logger.debug("create_payload_index skipped for %s (%s): %s", field_name, tkey, e)
+
+    def ensure_payload_indices(self, schema: Dict[str, str]) -> None:
+        """
+        Ensure payload indexes exist for a dict like:
+            {"genre": "keyword", "year": "integer"}
+
+        Convenience for preparing fields used in filters:
+        - match on strings  -> keyword
+        - range on numbers  -> integer or float
+        - boolean filters   -> bool
+        """
+        if not schema:
+            return
+        for field, ftype in schema.items():
+            self.create_payload_index(field, ftype)
+
+    # ---------------------------------------------------------------------
     # Ingest
     # ---------------------------------------------------------------------
-
     def ingest(
         self,
         items: Sequence[IngestItem],
@@ -87,19 +145,6 @@ class QMem:
 
         Embeddings are computed from each item's `embed_field`.
         By default, the embedded text is NOT stored in payload.
-
-        Args:
-            items: Records to ingest.
-            batch_size: Upsert in batches of this size.
-            payload_keys: If provided, only these keys are kept in payload.
-            include_embed_in_payload: If True, also store the embedded field in payload.
-
-        Returns:
-            Number of items written.
-
-        Raises:
-            RuntimeError: If collection is unset or missing.
-            ValueError: If a record lacks text in the chosen embed_field or dims mismatch.
         """
         if not items:
             return 0
@@ -159,18 +204,8 @@ class QMem:
     # ---------------------------------------------------------------------
     # Search
     # ---------------------------------------------------------------------
-
     def search(self, query: str, *, top_k: int = 5) -> List[RetrievalResult]:
-        """
-        Vector search against the current collection.
-
-        Args:
-            query: Natural language or keyword query.
-            top_k: Number of results to return.
-
-        Returns:
-            List of RetrievalResult objects with score and payload.
-        """
+        """Vector search against the current collection."""
         name = self._require_collection()
         vector = self.embedder.encode([query])[0]
         res = self.client.search(
@@ -190,10 +225,61 @@ class QMem:
             )
         return out
 
+    def search_filtered(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        query_filter: Union[dict, qmodels.Filter],
+    ) -> List[RetrievalResult]:
+        """Vector search scoped by a payload filter (hybrid)."""
+        name = self._require_collection()
+        vector = self.embedder.encode([query])[0]
+        res = self.client.search(
+            collection_name=name,
+            query_vector=vector,
+            limit=top_k,
+            with_payload=True,
+            query_filter=query_filter,
+        )
+        out: List[RetrievalResult] = []
+        for p in res:
+            out.append(
+                RetrievalResult(
+                    id=str(p.id),
+                    score=float(p.score),
+                    payload=dict(p.payload or {}),
+                )
+            )
+        return out
+
+    def scroll_filter(
+        self,
+        *,
+        query_filter: Union[dict, qmodels.Filter],
+        limit: int = 100,
+        offset: Optional[str] = None,
+    ) -> Tuple[List[RetrievalResult], Optional[str]]:
+        """
+        Payload-only retrieval using Qdrant scroll() with a filter.
+        No similarity scores are produced; we set score=0.0 for schema consistency.
+        """
+        name = self._require_collection()
+        points, next_offset = self.client.scroll(
+            collection_name=name,
+            with_payload=True,
+            limit=limit,
+            offset=offset,
+            scroll_filter=query_filter,  # correct kwarg for qdrant_client.scroll
+        )
+        results: List[RetrievalResult] = [
+            RetrievalResult(id=str(p.id), score=0.0, payload=dict(p.payload or {})) for p in points
+        ]
+        return results, next_offset
+
     # ---------------------------------------------------------------------
     # Helpers
     # ---------------------------------------------------------------------
-
     def _require_collection(self) -> str:
         """Ensure a collection name is configured."""
         if not self.collection or not str(self.collection).strip():
@@ -206,7 +292,6 @@ class QMem:
     def _get_collection_dim(self, name: str) -> int:
         """
         Fetch vector size (dimension) for a collection.
-
         Supports both single-vector and named-vectors configs.
         """
         try:
@@ -214,7 +299,6 @@ class QMem:
         except Exception as e:
             raise RuntimeError(f"Collection '{name}' does not exist or cannot be read: {e}") from e
 
-        # qdrant_client >= 1.7 typically: col.config.params.vectors
         vecs = getattr(getattr(col.config, "params", col.config), "vectors", None)
 
         # Case 1: single vector config
@@ -226,9 +310,7 @@ class QMem:
 
         # Case 2: named vectors dict
         try:
-            # vecs may be a dict-like: {"text": VectorParams(size=..., ...), ...}
             if isinstance(vecs, dict) and vecs:
-                # pick the first vector space's size
                 first = next(iter(vecs.values()))
                 return int(getattr(first, "size"))
         except Exception:
