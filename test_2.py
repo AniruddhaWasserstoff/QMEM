@@ -5,6 +5,7 @@ qm.ingest(
     file="/home/aniruddha/Desktop/qmem/data.jsonl",
     embed_field="query",
     # payload_field="query,response,genre,year" # optional: restrict payload keys
+    
 )
 
 table = qm.retrieve(query="dream heist", top_k=3)  # pretty table by default

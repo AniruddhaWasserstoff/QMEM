@@ -1,73 +1,154 @@
-# qmem 
+# QMem
 
-`qmem`  for **easy ingestion and retrieval** with embeddings using qdrant
-Supports both **CLI** and **Python API**.
+QMem is a toolkit for vector search.  
+It provides a **command-line interface (CLI)** and a **Python library** for interacting with a Qdrant database.  
+It is designed for **directness and utility**, offering a guided CLI for interactive tasks and a minimal Python API for programmatic control.
 
 ---
 
 ## 🚀 Installation
 
 ```bash
-pip install -e .
+pip install qmem
 ```
 
 ---
 
-## ⚙️ CLI Usage
+## 🛠️ Commands
 
-### 1. Init (configure keys & embedding model)
+### 🔹 init
+Initializes the configuration.
 
+**CLI**
 ```bash
 qmem init
 ```
 
-### 2. Ingest data
+---
 
+### 🔹 create
+Creates a vector collection.
+
+**CLI**
+```bash
+qmem create
+```
+
+**Library**
+```python
+import qmem
+
+qmem.create(
+    collection_name="my-collection",
+    dim=1536,
+    distance_metric="cosine"
+)
+```
+
+---
+
+### 🔹 ingest
+Ingests data into a collection.
+
+**CLI**
 ```bash
 qmem ingest
 ```
 
-You’ll be prompted for:
-- **collection_name**
-- **data file path** (JSON or JSONL)
-- **field to embed** (e.g. `query`, `response`, `sql_query`, `doc_id`)
-- **payload fields** (comma-separated, leave empty to keep all)
-
-### 3. Retrieve results
-
-```bash
-qmem retrieve
-```
-
-You’ll be prompted for:
-- **collection_name**
-- **query**
-- **top_k** (number of results to return)
-
----
-
-## 🐍 Python API
-
+**Library**
 ```python
-import qmem as qm
+import qmem
 
-# Create a collection
-qm.create(collection_name="test_learn", dim=1536, distance_metric="cosine")
-
-# Ingest data from a file
-qm.ingest(
-    file="/home/User/data.jsonl",
-    embed_field="sql_query",
-    payload_field="query,response",  # optional, keep these fields in payload
+qmem.ingest(
+    file="path/to/data.jsonl",
+    embed_field="text"
 )
-
-# Retrieve results (pretty table by default)
-table = qm.retrieve(query="list customers", top_k=5)
-print(table)
 ```
 
 ---
 
-## 📄 License
+### 🔹 retrieve
+Performs a vector search.
 
+**CLI**
+```bash
+qmem retrieve "your query text"
+```
+
+**Library**
+```python
+import qmem
+
+results = qmem.retrieve(
+    query="your query text",
+    top_k=3
+)
+print(results)
+```
+
+---
+
+### 🔹 index
+Creates an index on metadata for filtering.
+
+**CLI**
+```bash
+qmem index
+```
+
+---
+
+### 🔹 filter
+Retrieves records by metadata.
+
+**CLI**
+```bash
+qmem filter
+```
+
+**Library**
+```python
+import qmem
+
+filter_payload = {
+  "must": [
+    { "key": "genre", "match": { "value": "Sci-Fi" } }
+  ]
+}
+
+results = qmem.filter(filter_json=filter_payload, limit=10)
+print(results)
+```
+
+---
+
+### 🔹 retrieve-filter
+Combines vector search with metadata filtering.
+
+**CLI**
+```bash
+qmem retrieve-filter "your query text"
+```
+
+**Library**
+```python
+import qmem
+
+filter_payload = {
+  "must": [
+    { "key": "genre", "match": { "value": "Sci-Fi" } }
+  ]
+}
+
+results = qmem.retrieve_filter(
+    query="your query text",
+    filter_json=filter_payload,
+    top_k=2
+)
+print(results)
+```
+
+---
+
+## 📜 License
 MIT
