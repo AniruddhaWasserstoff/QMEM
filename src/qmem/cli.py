@@ -338,6 +338,12 @@ def create_collection(
 
     dim = dim or IntPrompt.ask("Embedding vector size for this collection", default=cfg.embed_dim or 1024)
 
+    # NEW: persist chosen dim to config, to keep CLI consistent with qm.create(...)
+    if cfg.embed_dim != dim:
+        cfg.embed_dim = dim
+        cfg.save(CONFIG_PATH)
+
+    # If not supplied via flag, ask interactively
     dist_key = distance.strip().lower() if distance else None
     if not dist_key:
         dist_key = qs.select(
