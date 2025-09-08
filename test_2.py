@@ -1,14 +1,14 @@
-import qmem as qm
-qm.create(collection_name="abc", dim=1024, distance_metric="cosine")
+# import qmem as qm
+# qm.create(collection_name="abc", dim=1024, distance_metric="cosine")
 
-qm.ingest(
-    file="/home/aniruddha/Desktop/qmem/data.jsonl",
-    embed_field="query",
-    # payload_field="query,response,genre,year" # optional: restrict payload keys
+# qm.ingest(
+#     file="/home/aniruddha/Desktop/qmem/data.jsonl",
+#     embed_field="query",
+#     # payload_field="query,response,genre,year" # optional: restrict payload keys
     
-)
+# )
 
-table = qm.retrieve(query="dream heist", top_k=3)  # pretty table by default
+table = qm.retrieve(query="road ingury", top_k=3)  # pretty table by default
 print(table)
 
 filter_json = {

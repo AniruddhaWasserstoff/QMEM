@@ -92,18 +92,16 @@ def _truncate(s: object, limit: int = 80) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-# New: default annotation helpers
+# default annotation helpers
 def _used_default(val, default) -> bool:
-    """Treat value as default if equal to the default."""
     return val == default
 
 
 def _ann(val, default) -> str:
-    """Render ' (default)' suffix when value equals default."""
     return " (default)" if _used_default(val, default) else ""
 
 
-# New: save filters for reuse
+# save filters for reuse
 def _save_filter_to_file(filter_obj: dict, name: Optional[str] = None) -> Path:
     """
     Save filter JSON to ./.qmem/filters/<name>.json.
@@ -111,7 +109,6 @@ def _save_filter_to_file(filter_obj: dict, name: Optional[str] = None) -> Path:
     """
     FILTERS_DIR.mkdir(parents=True, exist_ok=True)
     filename = (name or "latest").strip() or "latest"
-    # sanitize: allow alnum, dash, underscore
     safe = "".join(c for c in filename if c.isalnum() or c in ("-", "_")).rstrip(".")
     path = FILTERS_DIR / f"{safe}.json"
     path.write_text(json.dumps(filter_obj, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -233,7 +230,7 @@ def _build_filter_interactive() -> dict:
         if n <= 0:
             return
         conds = []
-        for i in range(1, n + 1):
+        for _ in range(1, n + 1):
             conds.append(_ask_condition(name.upper()))
         filter_obj[name] = conds
 
@@ -341,7 +338,6 @@ def create_collection(
 
     dim = dim or IntPrompt.ask("Embedding vector size for this collection", default=cfg.embed_dim or 1024)
 
-    # If not supplied via flag, ask interactively
     dist_key = distance.strip().lower() if distance else None
     if not dist_key:
         dist_key = qs.select(
@@ -388,7 +384,6 @@ def ingest(
     if not records:
         _fail(f"No records found in {data_path}")
 
-    # Build dynamic list of candidate string fields from the data itself
     candidates = _collect_string_fields(records)
     if not candidates and not any("vector" in r for r in records):
         _fail(
@@ -396,7 +391,6 @@ def ingest(
             "Add a string field to embed or include a 'vector' array in each record."
         )
 
-    # If user did not pass --embed-field, prompt dynamically
     if not embed_field:
         embed_field = qs.select(
             "Select the field to embed for ALL records:",
@@ -412,28 +406,18 @@ def ingest(
         payload or Prompt.ask("payload fields (comma-separated, empty = keep all fields)", default="")
     )
 
-    # Construct items; each record uses the SAME embed_field (unless vector is present)
     items: List[IngestItem] = []
     for d in records:
-        # Start with a pass-through of the whole record (flat)
         known = dict(d)
-
-        # Ensure control field exists/override
         known["embed_field"] = embed_field
-
-        # Ensure the selected embed_field text is present at top-level if available
         if embed_field in d:
             known[embed_field] = d[embed_field]
-
-        # Convenience keys (may already exist; that's fine)
         for k in ("query", "response", "sql_query", "doc_id", "graph", "tags"):
             if k in d:
                 known[k] = d[k]
-
         known.pop("extra", None)
         items.append(IngestItem(**known))
 
-    # Keep the embedded field text in payload as well
     n = q.ingest(items, payload_keys=payload_keys, include_embed_in_payload=True)
     console.print(
         f"[green]Upserted[/green] {n} items into [bold]{collection}[/bold] "
@@ -442,10 +426,10 @@ def ingest(
 
 
 # -----------------------------
-# retrieve (always show query + response)
+# retrieve (dynamic columns via prompt)
 # -----------------------------
 
-@app.command("retrieve", help="Vector search and show top-k with payload (does not create collections)")
+@app.command("retrieve", help="Vector search and show top-k with chosen payload columns")
 def retrieve(
     query: Optional[str] = typer.Argument(None, help="Search query (if omitted, you'll be prompted)"),
     k: Optional[int] = typer.Option(None, "--k", "-k", help="Top K"),
@@ -470,7 +454,20 @@ def retrieve(
         console.print_json(data=[r.model_dump() for r in results])
         return
 
-    show_keys = ["query", "response"]  # fixed columns for CLI
+    raw_cols = Prompt.ask(
+        "Columns to display (comma-separated; empty = ALL payload fields)",
+        default="",
+        show_default=False,
+    )
+    if raw_cols.strip():
+        show_keys = [s.strip() for s in raw_cols.split(",") if s.strip()]
+    else:
+        freq: Counter[str] = Counter()
+        for r in results:
+            for key, val in (r.payload or {}).items():
+                if isinstance(val, (str, int, float, bool)) and (str(val).strip() if isinstance(val, str) else True):
+                    freq[key] += 1
+        show_keys = [k for k, _ in sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))]
 
     table = Table(title=f"Top {k} results", box=box.ROUNDED)
     table.add_column("#", justify="right")
@@ -501,8 +498,6 @@ def _maybe_hint_create_index(error_msg: str) -> None:
         return
     field = m.group("field").strip()
     types = [t.strip().lower() for t in m.group("types").split(",")]
-    # Map qdrant type hint -> CLI choice
-    # qdrant may say 'keyword','integer','float','bool'
     console.print(
         "\n[yellow]Hint[/yellow]: Qdrant needs a payload index to filter on this field.\n"
         f"Run: [bold]qmem index[/bold] and add field [bold]{field}[/bold] with type "
@@ -511,7 +506,7 @@ def _maybe_hint_create_index(error_msg: str) -> None:
 
 
 # -----------------------------
-# NEW: filter (payload-only, no score column)
+# filter (payload-only) — prompts for columns
 # -----------------------------
 
 @app.command("filter", help="Filter payload (no vector search) — interactive builder")
@@ -526,7 +521,6 @@ def filter_cmd() -> None:
     limit = IntPrompt.ask("Limit", default=limit_default)
     console.print(f"[dim]Run options → limit = {limit}{_ann(limit, limit_default)}[/dim]")
 
-    # Ask to save for reuse
     yn_save = Prompt.ask("Save this filter for reuse? (y/N)", default="y")
     if (yn_save or "").lower().startswith("y"):
         default_name = "latest"
@@ -542,12 +536,26 @@ def filter_cmd() -> None:
         _maybe_hint_create_index(msg)
         raise typer.Exit(code=2)
 
-    # Render WITHOUT score column (uses shared table formatter)
-    console.print(format_results_table(results, show_score=False))
+    raw_cols = Prompt.ask(
+        "Columns to display (comma-separated; empty = ALL payload fields)",
+        default="",
+        show_default=False,
+    )
+    if raw_cols.strip():
+        show_keys = [s.strip() for s in raw_cols.split(",") if s.strip()]
+    else:
+        freq: Counter[str] = Counter()
+        for r in results:
+            for key, val in (r.payload or {}).items():
+                if isinstance(val, (str, int, float, bool)) and (str(val).strip() if isinstance(val, str) else True):
+                    freq[key] += 1
+        show_keys = [k for k, _ in sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+    console.print(format_results_table(results, show_score=False, show_keys=show_keys))
 
 
 # -----------------------------
-# NEW: retrieve_filter (hybrid, no score column)
+# retrieve_filter (hybrid) — prompts for columns
 # -----------------------------
 
 @app.command("retrieve_filter", help="Vector search scoped by a payload filter — interactive builder")
@@ -564,7 +572,6 @@ def retrieve_filter_cmd() -> None:
 
     filter_json = _build_filter_interactive()
 
-    # Ask to save for reuse
     yn_save = Prompt.ask("Save this filter for reuse? (y/N)", default="y")
     if (yn_save or "").lower().startswith("y"):
         default_name = "latest"
@@ -580,12 +587,26 @@ def retrieve_filter_cmd() -> None:
         _maybe_hint_create_index(msg)
         raise typer.Exit(code=2)
 
-    # Render WITHOUT score column (uses shared table formatter)
-    console.print(format_results_table(results, show_score=False))
+    raw_cols = Prompt.ask(
+        "Columns to display (comma-separated; empty = ALL payload fields)",
+        default="",
+        show_default=False,
+    )
+    if raw_cols.strip():
+        show_keys = [s.strip() for s in raw_cols.split(",") if s.strip()]
+    else:
+        freq: Counter[str] = Counter()
+        for r in results:
+            for key, val in (r.payload or {}).items():
+                if isinstance(val, (str, int, float, bool)) and (str(val).strip() if isinstance(val, str) else True):
+                    freq[key] += 1
+        show_keys = [k for k, _ in sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+    console.print(format_results_table(results, show_score=False, show_keys=show_keys))
 
 
 # -----------------------------
-# NEW: index (interactive payload index creation)
+# index (interactive payload index creation)
 # -----------------------------
 
 @app.command("index", help="Create payload indexes (interactive)")
@@ -593,15 +614,6 @@ def index_cmd() -> None:
     """
     Interactively create Qdrant payload indexes for fields you plan to filter on.
     Types supported here: keyword | integer | float | bool
-
-    Example flow:
-      qmem index
-      collection_name: WASD
-      Field name (blank to finish): genre
-      Index type: keyword
-      Field name (blank to finish): year
-      Index type: integer
-      Field name (blank to finish): [ENTER]
     """
     cfg = QMemConfig.load(CONFIG_PATH)
     collection = Prompt.ask("collection_name")
@@ -644,7 +656,6 @@ def index_cmd() -> None:
             )
             created.append(field)
         except Exception as e:
-            # If already exists or other recoverable cases, just log
             console.print(f"[yellow]Skipped[/yellow] {field}: {e}")
 
     if created:

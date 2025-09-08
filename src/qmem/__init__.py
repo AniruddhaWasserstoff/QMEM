@@ -53,7 +53,7 @@ try:
     __version__: str = _metadata.version("qmem")
 except _metadata.PackageNotFoundError:
     # Fallback for editable/local use
-    __version__ = "0.0.9"
+    __version__ = "0.1.1"
 
 # -----------------------------
 # Defaults & state
@@ -108,60 +108,86 @@ def _resolve_filter_arg(filter_arg: Union[dict, str, Path]) -> dict:
 def format_results_table(
     results: Sequence[RetrievalResult],
     *,
-    max_query_len: int = 75,
-    max_resp_len: int = 60,
+    max_query_len: int = 75,   # legacy knobs kept; applied to the first payload column
+    max_resp_len: int = 60,    # used for subsequent payload columns
     show_score: bool = True,
+    show_keys: Optional[Sequence[str]] = None,  # None -> infer ALL payload keys
 ) -> str:
-    """Build a Unicode table. Set show_score=False to hide the score column."""
+    """
+    Build a Unicode table.
+
+    Defaults:
+      - show_score=True → includes a 'score' column
+      - show_keys=None  → infer ALL scalar payload keys from results (frequency desc, then name)
+
+    Example:
+      format_results_table(results, show_keys=['title', 'type'])
+    """
     def trunc(s: Optional[str], n: int) -> str:
         s = "" if s is None else str(s)
         return s if len(s) <= n else s[: n - 1] + "…"
 
-    if show_score:
-        header = ["#", "score", "query", "response"]
-        w0, w1, w2, w3 = 2, 5, max(75, max_query_len), max(60, max_resp_len)
-        top = f"┌{'─'*w0}┬{'─'*w1}┬{'─'*w2}┬{'─'*w3}┐"
-        mid = f"├{'─'*w0}┼{'─'*w1}┼{'─'*w2}┼{'─'*w3}┤"
-        bot = f"└{'─'*w0}┴{'─'*w1}┴{'─'*w2}┴{'─'*w3}┘"
-
-        def row(a, b, c, d) -> str:
-            return (
-                f"│{str(a).rjust(w0)}"
-                f"│{str(b).rjust(w1)}"
-                f"│{str(c).ljust(w2)}"
-                f"│{str(d).ljust(w3)}│"
-            )
-
-        lines = [top, row(*header), mid]
-        for i, r in enumerate(results, 1):
-            score = f"{getattr(r, 'score', 0):.4f}"
+    # Infer keys if not provided: union of scalar payload keys across results,
+    # ordered by (frequency desc, name asc).
+    if show_keys is None:
+        from collections import Counter
+        freq = Counter()
+        for r in results or []:
             payload = getattr(r, "payload", {}) or {}
-            q = trunc(payload.get("query"), max_query_len)       # strictly 'query'
-            resp = trunc(payload.get("response"), max_resp_len)  # strictly 'response'
-            lines.append(row(i, score, q, resp))
-        lines.append(bot)
-        return "\n".join(lines)
+            for k, v in payload.items():
+                if isinstance(v, (str, int, float, bool)) and (str(v).strip() if isinstance(v, str) else True):
+                    freq[k] += 1
+        keys: List[str] = [k for k, _ in sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))]
+    else:
+        keys = list(show_keys)
 
-    # show_score == False
-    header = ["#", "query", "response"]
-    w0, w2, w3 = 2, max(75, max_query_len), max(60, max_resp_len)
-    top = f"┌{'─'*w0}┬{'─'*w2}┬{'─'*w3}┐"
-    mid = f"├{'─'*w0}┼{'─'*w2}┼{'─'*w3}┤"
-    bot = f"└{'─'*w0}┴{'─'*w2}┴{'─'*w3}┘"
+    # Decide column widths:
+    # - "#"   -> 2
+    # - "score" -> 5
+    # - payload cols: first gets max(20, max_query_len) to keep a wide lead column; others use max(20, max_resp_len)
+    first_payload_w = max(20, max_query_len) if keys else 0
+    payload_widths = [(first_payload_w if i == 0 else max(20, max_resp_len)) for i in range(len(keys))]
 
-    def row(a, c, d) -> str:
-        return (
-            f"│{str(a).rjust(w0)}"
-            f"│{str(c).ljust(w2)}"
-            f"│{str(d).ljust(w3)}│"
-        )
+    if show_score:
+        widths = [2, 5] + payload_widths
+        header = ["#", "score"] + keys
+    else:
+        widths = [2] + payload_widths
+        header = ["#"] + keys
 
-    lines = [top, row(*header), mid]
-    for i, r in enumerate(results, 1):
+    # Build borders dynamically
+    top = "┌" + "┬".join("─" * w for w in widths) + "┐"
+    mid = "├" + "┼".join("─" * w for w in widths) + "┤"
+    bot = "└" + "┴".join("─" * w for w in widths) + "┘"
+
+    def row(cells: Sequence[object]) -> str:
+        out: List[str] = []
+        for i, (cell, w) in enumerate(zip(cells, widths)):
+            text = str(cell)
+            # Right-justify first two columns (#, score) when score is present;
+            # when show_score=False, only '#' is right-justified.
+            if (show_score and i <= 1) or (not show_score and i == 0):
+                out.append(text.rjust(w))
+            else:
+                out.append(text.ljust(w))
+        return "│" + "│".join(out) + "│"
+
+    # Assemble table
+    lines = [top, row(header), mid]
+    for idx, r in enumerate(results, 1):
         payload = getattr(r, "payload", {}) or {}
-        q = trunc(payload.get("query"), max_query_len)
-        resp = trunc(payload.get("response"), max_resp_len)
-        lines.append(row(i, q, resp))
+        payload_cells: List[str] = []
+        for j, k in enumerate(keys):
+            limit = first_payload_w if j == 0 else max(20, max_resp_len)
+            payload_cells.append(trunc(payload.get(k), limit))
+
+        if show_score:
+            cells: List[object] = [idx, f"{getattr(r, 'score', 0):.4f}"] + payload_cells
+        else:
+            cells = [idx] + payload_cells
+
+        lines.append(row(cells))
+
     lines.append(bot)
     return "\n".join(lines)
 
@@ -249,9 +275,10 @@ def retrieve(
     collection_name: Optional[str] = None,
     as_table: bool = True,
     cfg: Optional[QMemConfig] = None,
+    show: Optional[Sequence[str]] = None,  # choose payload columns in the table; None -> ALL
 ) -> Union[str, List[RetrievalResult]]:
     """
-    qm.retrieve(query="...", top_k=5)
+    qm.retrieve(query="...", top_k=5, show=["title","type"])
 
     Returns:
       - pretty table string by default (as_table=True)
@@ -262,7 +289,7 @@ def retrieve(
 
     coll = _ensure_collection_set(collection_name)
     results = _api_retrieve(coll, query, k=top_k, cfg=cfg)
-    return format_results_table(results) if as_table else results
+    return format_results_table(results, show_keys=show) if as_table else results
 
 
 def filter(
@@ -272,15 +299,16 @@ def filter(
     collection_name: Optional[str] = None,
     as_table: bool = True,
     cfg: Optional[QMemConfig] = None,
+    show: Optional[Sequence[str]] = None,   # NEW: choose payload columns; None -> ALL
 ) -> Union[str, List[RetrievalResult]]:
     """
-    qm.filter(filter_json={...} | 'latest' | 'path/to/file.json', limit=100)
+    qm.filter(filter_json={...} | 'latest' | 'path/to/file.json', limit=100, show=['title','type'])
     Payload-only results by default; prints a table WITHOUT the score column.
     """
     coll = _ensure_collection_set(collection_name)
     filt = _resolve_filter_arg(filter_json)
     results = _api_retrieve_by_filter(coll, filter=filt, k=limit, query=None, cfg=cfg)
-    return format_results_table(results, show_score=False) if as_table else results
+    return format_results_table(results, show_score=False, show_keys=show) if as_table else results
 
 
 def retrieve_filter(
@@ -291,9 +319,10 @@ def retrieve_filter(
     collection_name: Optional[str] = None,
     as_table: bool = True,
     cfg: Optional[QMemConfig] = None,
+    show: Optional[Sequence[str]] = None,   # NEW: choose payload columns; None -> ALL
 ) -> Union[str, List[RetrievalResult]]:
     """
-    qm.retrieve_filter(query, filter_json={...} | 'latest' | 'path/to/file.json', top_k=5)
+    qm.retrieve_filter(query, filter_json={...} | 'latest' | 'path/to/file.json', top_k=5, show=['title','type'])
     Hybrid search; prints a table WITHOUT the score column by default.
     """
     if not query:
@@ -301,4 +330,4 @@ def retrieve_filter(
     coll = _ensure_collection_set(collection_name)
     filt = _resolve_filter_arg(filter_json)
     results = _api_retrieve_by_filter(coll, filter=filt, k=top_k, query=query, cfg=cfg)
-    return format_results_table(results, show_score=False) if as_table else results
+    return format_results_table(results, show_score=False, show_keys=show) if as_table else results
