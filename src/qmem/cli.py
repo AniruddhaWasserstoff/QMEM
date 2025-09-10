@@ -668,3 +668,72 @@ def index_cmd() -> None:
         console.print(f"[green]Created/verified indexes[/green] on {collection}: {', '.join(created)}")
     else:
         console.print(f"[yellow]No new indexes created[/yellow] on {collection}.")
+
+
+# -----------------------------
+# mongo (mirror an existing Qdrant collection → MongoDB)
+# -----------------------------
+
+@app.command("mongo", help="Mirror an existing Qdrant collection's payloads into MongoDB")
+def mongo_cmd() -> None:
+    cfg = QMemConfig.load(CONFIG_PATH)
+    collection = Prompt.ask("collection_name")
+    q = QMem(cfg, collection=collection)
+    _ensure_collection_exists(q, collection)
+
+    console.print("[bold]Discovering payload fields (sampling up to 200 docs)...[/bold]")
+    # sample to collect keys
+    try:
+        sample_results, _ = q.scroll_filter(query_filter={}, limit=200)
+    except Exception as e:
+        console.print(f"[red]Failed to sample collection:[/red] {e}")
+        raise typer.Exit(code=2)
+
+    # Build a frequency map of simple scalar keys
+    freq: Counter[str] = Counter()
+    for r in sample_results:
+        for k, v in (r.payload or {}).items():
+            if isinstance(v, (str, int, float, bool)) and (str(v).strip() if isinstance(v, str) else True):
+                freq[k] += 1
+
+    # Present dynamic field list (checkbox). Empty selection => FULL payload.
+    choices = [qs.Choice(k, checked=False) for k, _ in sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))]
+    if not choices:
+        console.print("[yellow]No scalar payload fields found in sample; defaulting to FULL payload.[/yellow]")
+        selected_fields = []
+    else:
+        selected_fields = qs.checkbox(
+            "Select fields to store in Mongo (space to toggle; ENTER to confirm; empty = FULL payload)",
+            choices=choices,
+        ).ask() or []
+
+    mongo_uri = Prompt.ask(
+        "Mongo URI (blank = mongodb://127.0.0.1:27017)", default="", show_default=False
+    ) or "mongodb://127.0.0.1:27017"
+    mongo_db = Prompt.ask(
+        "Mongo database (blank = qmem)", default="", show_default=False
+    ) or "qmem"
+    mongo_coll = Prompt.ask(
+        f"Mongo collection name (blank = {collection})", default="", show_default=False
+    ) or collection
+
+    confirm = Prompt.ask(
+        "Mirror ALL points from Qdrant → Mongo? (y/N)", default="y"
+    )
+    if not (confirm or "").lower().startswith("y"):
+        console.print("[yellow]Aborted.[/yellow]")
+        raise typer.Exit(code=0)
+
+    # None => FULL payload; else restrict to selected set
+    mongo_keys = set(selected_fields) if selected_fields else None
+
+    total = q.mirror_to_mongo(
+        mongo_uri=mongo_uri,
+        mongo_db=mongo_db,
+        mongo_coll=mongo_coll,
+        mongo_keys=mongo_keys,
+        batch_size=1000,  # scroll batch size
+    )
+    console.print(
+        f"[green]Mirrored[/green] {total} documents to Mongo (db={mongo_db}, coll={mongo_coll})."
+    )

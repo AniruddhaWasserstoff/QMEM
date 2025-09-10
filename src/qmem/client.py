@@ -278,6 +278,76 @@ class QMem:
         return results, next_offset
 
     # ---------------------------------------------------------------------
+    # Mongo mirroring (for `qmem mongo`)
+    # ---------------------------------------------------------------------
+    def mirror_to_mongo(
+        self,
+        *,
+        mongo_uri: str,
+        mongo_db: str,
+        mongo_coll: str,
+        mongo_keys: Optional[Set[str]] = None,
+        batch_size: int = 1000,
+        max_docs: Optional[int] = None,
+    ) -> int:
+        """
+        Mirror all (or up to max_docs) points from the current Qdrant collection into MongoDB.
+
+        - mongo_keys=None  => mirror FULL payload (as stored in Qdrant)
+        - mongo_keys={'x','y'} => only store those keys
+        - Mongo _id is set to the Qdrant point ID for 1:1 mapping.
+        """
+        name = self._require_collection()
+
+        # Init sink (short-lived per call)
+        try:
+            from .mongo_sink import MongoSink  # lazy import
+            sink = MongoSink(mongo_uri, mongo_db)
+        except Exception as e:
+            raise RuntimeError(f"Could not initialize Mongo sink: {e}") from e
+
+        stored = 0
+        next_offset: Optional[str] = None
+
+        while True:
+            points, next_offset = self.client.scroll(
+                collection_name=name,
+                with_payload=True,
+                limit=batch_size,
+                offset=next_offset,
+            )
+
+            if not points:
+                break
+
+            docs: List[Dict[str, Any]] = []
+            for p in points:
+                pl = dict(p.payload or {})
+                doc = pl if not mongo_keys else {k: pl.get(k) for k in mongo_keys if k in pl}
+                doc["_id"] = str(p.id)
+                docs.append(doc)
+
+            if docs:
+                try:
+                    sink.insert_many(mongo_coll, docs)
+                    stored += len(docs)
+                except Exception as e:
+                    logger.warning("Mongo insert failed for a batch: %s", e)
+
+            if max_docs is not None and stored >= max_docs:
+                break
+
+            if not next_offset:
+                break
+
+        try:
+            sink.close()
+        except Exception:
+            pass
+
+        return stored
+
+    # ---------------------------------------------------------------------
     # Helpers
     # ---------------------------------------------------------------------
     def _require_collection(self) -> str:

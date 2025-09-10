@@ -29,6 +29,7 @@ from .api import (
     ingest_from_file as _api_ingest_from_file,
     retrieve as _api_retrieve,
     retrieve_by_filter as _api_retrieve_by_filter,
+    mongo as _api_mongo,  # NEW
 )
 
 __all__ = (
@@ -41,6 +42,7 @@ __all__ = (
     "retrieve",
     "filter",
     "retrieve_filter",
+    "mongo",              # NEW
     "format_results_table",
     "__version__",
 )
@@ -53,7 +55,7 @@ try:
     __version__: str = _metadata.version("qmem")
 except _metadata.PackageNotFoundError:
     # Fallback for editable/local use
-    __version__ = "0.1.2"
+    __version__ = "0.1.3"
 
 # -----------------------------
 # Defaults & state
@@ -331,3 +333,36 @@ def retrieve_filter(
     filt = _resolve_filter_arg(filter_json)
     results = _api_retrieve_by_filter(coll, filter=filt, k=top_k, query=query, cfg=cfg)
     return format_results_table(results, show_score=False, show_keys=show) if as_table else results
+
+
+# -----------------------------
+# NEW: programmatic Mongo mirror helper
+# -----------------------------
+def mongo(
+    *,
+    collection_name: Optional[str] = None,
+    fields: Optional[Sequence[str]] = None,          # None/[] => FULL payload
+    mongo_uri: str = "mongodb://127.0.0.1:27017",
+    mongo_db: str = "qmem",
+    mongo_collection: Optional[str] = None,          # defaults to collection_name
+    batch_size: int = 1000,
+    max_docs: Optional[int] = None,
+    cfg: Optional[QMemConfig] = None,
+) -> int:
+    """
+    qm.mongo(collection_name="...", fields=["title","type"], mongo_db="qmem_payload_db", mongo_collection="qmem_payload")
+
+    Mirrors payloads from an existing Qdrant collection into MongoDB.
+    If collection_name is omitted, uses the last collection set via qm.create(...).
+    """
+    coll = _ensure_collection_set(collection_name)
+    return _api_mongo(
+        collection_name=coll,
+        fields=fields,
+        mongo_uri=mongo_uri,
+        mongo_db=mongo_db,
+        mongo_collection=mongo_collection,
+        batch_size=batch_size,
+        max_docs=max_docs,
+        cfg=cfg,
+    )

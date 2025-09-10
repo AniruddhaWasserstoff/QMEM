@@ -16,6 +16,7 @@ __all__ = [
     "ingest_from_file",
     "retrieve",
     "retrieve_by_filter",
+    "mongo",  # NEW: mirror existing Qdrant collection -> MongoDB
 ]
 
 # -----------------------------
@@ -272,3 +273,57 @@ def retrieve_by_filter(
 
     results, _ = q.scroll_filter(query_filter=filter, limit=k)
     return results
+
+
+# -----------------------------
+# NEW: programmatic Mongo mirror
+# -----------------------------
+
+def mongo(
+    *,
+    collection_name: str,
+    fields: Optional[Sequence[str]] = None,          # None/[] => FULL payload
+    mongo_uri: str = "mongodb://127.0.0.1:27017",
+    mongo_db: str = "qmem",
+    mongo_collection: Optional[str] = None,          # defaults to collection_name
+    batch_size: int = 1000,
+    max_docs: Optional[int] = None,
+    cfg: Optional[QMemConfig] = None,
+) -> int:
+    """
+    Mirror an existing Qdrant collection's payloads into MongoDB.
+
+    Args:
+        collection_name: Qdrant collection to read from (must already exist).
+        fields: Subset of payload keys to store in Mongo.
+                None or empty => mirror FULL payload.
+        mongo_uri: Mongo connection string.
+        mongo_db: Target Mongo database.
+        mongo_collection: Target collection (defaults to collection_name).
+        batch_size: Qdrant scroll page size (performance/memory trade-off).
+        max_docs: Optional total cap on mirrored documents (None = all).
+        cfg: Optional QMemConfig; loaded from CONFIG_PATH if not provided.
+
+    Returns:
+        Number of documents mirrored to Mongo.
+    """
+    cfg = cfg or QMemConfig.load(CONFIG_PATH)
+    q = QMem(cfg, collection=collection_name)
+
+    # Ensure the source collection exists
+    try:
+        q.client.get_collection(collection_name)
+    except Exception as e:
+        raise RuntimeError(f"No such Qdrant collection: {collection_name}") from e
+
+    mongo_keys: Optional[Set[str]] = set(fields) if fields else None
+    coll = mongo_collection or collection_name
+
+    return q.mirror_to_mongo(
+        mongo_uri=mongo_uri,
+        mongo_db=mongo_db,
+        mongo_coll=coll,
+        mongo_keys=mongo_keys,
+        batch_size=batch_size,
+        max_docs=max_docs,
+    )
