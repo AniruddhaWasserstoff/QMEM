@@ -262,44 +262,106 @@ def init_cmd() -> None:
     cfg_path = CONFIG_PATH
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
 
-    console.print("qmem init — set keys and choose embedding model", style="bold")
-    openai_key = Prompt.ask(
-        "OpenAI API key (leave empty if using MiniLM on Hugging Face)",
-        default="",
-        show_default=False,
-        password=True,
-    )
+    console.print("qmem init — set keys and choose embedding provider/model", style="bold")
 
+    # Qdrant first (unchanged)
     qdrant_url = Prompt.ask("Qdrant URL (e.g., https://xxxx.cloud.qdrant.io)")
     qdrant_key = Prompt.ask("Qdrant API key", password=True)
 
-    model_choice = qs.select(
-        "Choose embedding model:",
-        choices=[
-            "text-embedding-3-small (OpenAI, 1536)",
-            "text-embedding-3-large (OpenAI, 3072)",
-            "MiniLM (Hugging Face API, 384)",
-        ],
+    # 1) Provider
+    provider = qs.select(
+        "Embedding provider:",
+        choices=["openai", "gemini", "voyage", "minilm"],
         pointer="➤",
         use_shortcuts=False,
     ).ask()
 
+    # 2) Provider-specific models + keys
+    openai_key = ""
     hf_key = ""
-    if model_choice and model_choice.startswith("text-embedding-3-small"):
-        provider, model, default_dim = "openai", "text-embedding-3-small", 1536
-    elif model_choice and model_choice.startswith("text-embedding-3-large"):
-        provider, model, default_dim = "openai", "text-embedding-3-large", 3072
-    else:
-        provider, model, default_dim = "minilm", "sentence-transformers/all-MiniLM-L6-v2", 384
-        hf_key = Prompt.ask("Hugging Face API key (required for MiniLM via HF)", password=True)
+    gemini_key = ""
+    voyage_key = ""
+    default_dim = 1024  # will be overridden per-provider
+    dim: Optional[int] = None  # if set inside a branch, we won't re-prompt later
 
-    dim = IntPrompt.ask("Embedding dimension", default=default_dim)
+    if provider == "openai":
+        model = qs.select(
+            "OpenAI embedding model:",
+            choices=[
+                "text-embedding-3-small (1536)",
+                "text-embedding-3-large (3072)",
+            ],
+            pointer="➤",
+            use_shortcuts=False,
+        ).ask()
+        if model.startswith("text-embedding-3-small"):
+            model, default_dim = "text-embedding-3-small", 1536
+        else:
+            model, default_dim = "text-embedding-3-large", 3072
+        openai_key = Prompt.ask("OpenAI API key", password=True)
 
+    elif provider == "gemini":
+        model = qs.select(
+            "Gemini (Google) embedding model:",
+            choices=[
+                "models/embedding-001 (768)",
+            ],
+            pointer="➤",
+            use_shortcuts=False,
+        ).ask()
+        model, default_dim = "models/embedding-001", 768
+        gemini_key = Prompt.ask("Gemini API key", password=True)
+
+    elif provider == "voyage":
+        model = qs.select(
+            "Voyage embedding model:",
+            choices=[
+                "voyage-3-large",
+                "voyage-3.5",
+                "voyage-3.5-lite",
+                "voyage-code-3",
+                "voyage-finance-2",
+                "voyage-law-2",
+                "voyage-code-2",
+            ],
+            pointer="➤",
+            use_shortcuts=False,
+        ).ask()
+
+        # Default dims by model + conditional override prompt
+        if model in {"voyage-3-large", "voyage-3.5", "voyage-3.5-lite", "voyage-code-3"}:
+            default_dim = 1024
+            dim = IntPrompt.ask("Embedding dimension (256, 512, 1024, or 2048)", default=default_dim)
+        elif model == "voyage-finance-2":
+            default_dim = 1024
+            dim = 1024
+        elif model == "voyage-law-2":
+            default_dim = 1024
+            dim = 1024
+        elif model == "voyage-code-2":
+            default_dim = 1536
+            dim = 1536
+        else:
+            default_dim = 1024  # fallback
+
+        voyage_key = Prompt.ask("Voyage API key", password=True)
+
+    else:  # minilm (Hugging Face Inference API)
+        model, default_dim = "sentence-transformers/all-MiniLM-L6-v2", 384
+        hf_key = Prompt.ask("Hugging Face API key (Inference API)", password=True)
+
+    # 3) Dimension: only ask here if not already fixed/asked above
+    if dim is None:
+        dim = IntPrompt.ask("Embedding dimension", default=default_dim)
+
+    # 4) Save config
     cfg = QMemConfig(
-        openai_api_key=(openai_key or None),
-        hf_api_key=(hf_key or None),
         qdrant_url=qdrant_url,
         qdrant_api_key=qdrant_key,
+        openai_api_key=(openai_key or None),
+        hf_api_key=(hf_key or None),
+        gemini_api_key=(gemini_key or None),
+        voyage_api_key=(voyage_key or None),
         embed_provider=provider,
         embed_model=model,
         embed_dim=dim,
@@ -307,7 +369,6 @@ def init_cmd() -> None:
     )
     cfg.save(cfg_path)
     console.print(f"[green]Saved[/green] config to {cfg_path}")
-
 
 # -----------------------------
 # create

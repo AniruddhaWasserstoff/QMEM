@@ -16,14 +16,16 @@ __all__ = ["QMemConfig", "CONFIG_DIR", "CONFIG_PATH", "FILTERS_DIR"]
 
 CONFIG_DIR = Path(".qmem")
 CONFIG_PATH = CONFIG_DIR / "config.toml"
-FILTERS_DIR = CONFIG_DIR / "filters"  # new: where saved filter JSONs live
+FILTERS_DIR = CONFIG_DIR / "filters"  # where saved filter JSONs live
 
-# Environment variable names
+# Environment variable names (env > file when loading)
 _ENV = {
     "qdrant_url": "QMEM_QDRANT_URL",
     "qdrant_api_key": "QMEM_QDRANT_API_KEY",
     "openai_api_key": "QMEM_OPENAI_API_KEY",
     "hf_api_key": "QMEM_HF_API_KEY",
+    "gemini_api_key": "QMEM_GEMINI_API_KEY",   # NEW
+    "voyage_api_key": "QMEM_VOYAGE_API_KEY",   # NEW
     "embed_provider": "QMEM_EMBED_PROVIDER",
     "embed_model": "QMEM_EMBED_MODEL",
     "embed_dim": "QMEM_EMBED_DIM",
@@ -60,7 +62,9 @@ class QMemConfig(BaseModel):
       - QMEM_QDRANT_API_KEY
       - QMEM_OPENAI_API_KEY
       - QMEM_HF_API_KEY
-      - QMEM_EMBED_PROVIDER  (openai|minilm)
+      - QMEM_GEMINI_API_KEY
+      - QMEM_VOYAGE_API_KEY
+      - QMEM_EMBED_PROVIDER  (openai|minilm|gemini|voyage)
       - QMEM_EMBED_MODEL
       - QMEM_EMBED_DIM
       - QMEM_DEFAULT_COLLECTION
@@ -76,9 +80,15 @@ class QMemConfig(BaseModel):
         default=None,
         description="Hugging Face API key (if using hosted MiniLM via HF Inference API)",
     )
+    gemini_api_key: Optional[str] = Field(
+        default=None, description="Google Gemini API key (if using Gemini embeddings)"
+    )
+    voyage_api_key: Optional[str] = Field(
+        default=None, description="Voyage AI API key (if using Voyage embeddings)"
+    )
 
     # Embeddings
-    embed_provider: Literal["openai", "minilm"]
+    embed_provider: Literal["openai", "minilm", "gemini", "voyage"]
     embed_model: str
     embed_dim: int
 
@@ -96,6 +106,8 @@ class QMemConfig(BaseModel):
             f"qdrant_api_key={_mask(self.qdrant_api_key)!r}, "
             f"openai_api_key={_mask(self.openai_api_key)!r}, "
             f"hf_api_key={_mask(self.hf_api_key)!r}, "
+            f"gemini_api_key={_mask(self.gemini_api_key)!r}, "
+            f"voyage_api_key={_mask(self.voyage_api_key)!r}, "
             f"embed_provider={self.embed_provider!r}, "
             f"embed_model={self.embed_model!r}, "
             f"embed_dim={self.embed_dim!r}, "
@@ -111,6 +123,8 @@ class QMemConfig(BaseModel):
         d["qdrant_api_key"] = _mask(self.qdrant_api_key)
         d["openai_api_key"] = _mask(self.openai_api_key)
         d["hf_api_key"] = _mask(self.hf_api_key)
+        d["gemini_api_key"] = _mask(self.gemini_api_key)
+        d["voyage_api_key"] = _mask(self.voyage_api_key)
         return d
 
     # -----------------------
@@ -160,6 +174,8 @@ class QMemConfig(BaseModel):
         doc.add("qdrant_api_key", self.qdrant_api_key)
         doc.add("openai_api_key", self.openai_api_key or "")
         doc.add("hf_api_key", self.hf_api_key or "")
+        doc.add("gemini_api_key", self.gemini_api_key or "")   # NEW
+        doc.add("voyage_api_key", self.voyage_api_key or "")   # NEW
         doc.add("embed_provider", self.embed_provider)
         doc.add("embed_model", self.embed_model)
         doc.add("embed_dim", int(self.embed_dim))
