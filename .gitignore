@@ -38,6 +38,7 @@ venv.bak/
 # Local qmem state (don’t commit secrets or filters)
 .qmem/config.toml
 .qmem/filters/*.json
+.qmem/chroma/*
 
 # Local data / scratch
 data/
