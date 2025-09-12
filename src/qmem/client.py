@@ -6,6 +6,12 @@ from uuid import uuid4
 
 from qdrant_client import QdrantClient, models as qmodels
 
+# Chroma is optional; required only when vector_store == "chroma"
+try:
+    import chromadb  # type: ignore
+except Exception:
+    chromadb = None  # checked at runtime
+
 from .config import QMemConfig
 from .embedder import build_embedder
 from .schemas import IngestItem, RetrievalResult
@@ -15,7 +21,10 @@ __all__ = ["QMem"]
 logger = log.getLogger(__name__)
 
 
-class QMem:
+# =============================================================================
+# Qdrant implementation (existing logic, preserved)
+# =============================================================================
+class _QMemQdrant:
     """Minimal client for ingest & retrieval against a single Qdrant collection."""
 
     # -----------------------------
@@ -49,11 +58,6 @@ class QMem:
     ) -> None:
         """
         Ensure the current collection exists (optionally creating it).
-
-        Args:
-            create_if_missing: If True, creates the collection when missing.
-            distance: Distance metric to configure when creating.
-            vector_size: Vector dimension for the collection (defaults to embedder.dim).
         """
         name = self._require_collection()
         try:
@@ -89,10 +93,8 @@ class QMem:
 
     def create_payload_index(self, field_name: str, field_type: str) -> None:
         """
-        Create a single payload index on `field_name` of type in
-        {"keyword","integer","float","bool"} (case-insensitive).
-
-        Safe to call repeatedly; will no-op if the index already exists (errors are ignored).
+        Create a single payload index on `field_name` (keyword|integer|float|bool).
+        Safe to call repeatedly; no-ops if already exists.
         """
         name = self._require_collection()
         tkey = (field_type or "").strip().lower()
@@ -111,19 +113,10 @@ class QMem:
             )
             logger.info("Created payload index: %s (%s)", field_name, tkey)
         except Exception as e:
-            # Already exists / race conditions -> ignore, keep quiet in normal operation
             logger.debug("create_payload_index skipped for %s (%s): %s", field_name, tkey, e)
 
     def ensure_payload_indices(self, schema: Dict[str, str]) -> None:
-        """
-        Ensure payload indexes exist for a dict like:
-            {"genre": "keyword", "year": "integer"}
-
-        Convenience for preparing fields used in filters:
-        - match on strings  -> keyword
-        - range on numbers  -> integer or float
-        - boolean filters   -> bool
-        """
+        """Ensure payload indexes exist for a dict like {'genre':'keyword', 'year':'integer'}."""
         if not schema:
             return
         for field, ftype in schema.items():
@@ -142,7 +135,6 @@ class QMem:
     ) -> int:
         """
         Upsert items into the current collection.
-
         Embeddings are computed from each item's `embed_field`.
         By default, the embedded text is NOT stored in payload.
         """
@@ -292,10 +284,6 @@ class QMem:
     ) -> int:
         """
         Mirror all (or up to max_docs) points from the current Qdrant collection into MongoDB.
-
-        - mongo_keys=None  => mirror FULL payload (as stored in Qdrant)
-        - mongo_keys={'x','y'} => only store those keys
-        - Mongo _id is set to the Qdrant point ID for 1:1 mapping.
         """
         name = self._require_collection()
 
@@ -399,12 +387,7 @@ class QMem:
         payload_keys: Optional[Set[str]] = None,
         include_embed_in_payload: bool = False,
     ) -> Dict[str, Any]:
-        """
-        Build payload dict from IngestItem, excluding the embedded field by default.
-
-        - payload_keys=None means "all available (except embedded)".
-        - include_embed_in_payload=False ensures the embedded text is never stored.
-        """
+        """Build payload dict from IngestItem, excluding the embedded field by default."""
         d = it.model_dump(exclude_none=True)
         d.pop("embed_field", None)  # control field is not persisted
 
@@ -428,3 +411,287 @@ class QMem:
                 f"embedder produced {dim}."
             )
         return vectors
+
+
+# =============================================================================
+# Chroma implementation (local-only)
+# =============================================================================
+class _QMemChroma:
+    """
+    Local ChromaDB backend with the same public surface as the Qdrant client.
+    - Persistent at cfg.chroma_path (defaults to ./.qmem/chroma)
+    - No explicit payload indexes required (schema-less)
+    """
+
+    def __init__(self, cfg: QMemConfig, collection: Optional[str] = None) -> None:
+        if chromadb is None:
+            raise RuntimeError("ChromaDB backend requires 'chromadb'. Install with: pip install chromadb>=0.5")
+        self.cfg = cfg
+        self.collection = collection or cfg.default_collection
+        self.embedder = build_embedder(cfg)
+        path = cfg.chroma_path or ""
+        self._client = chromadb.PersistentClient(path=path)
+        self._col = None  # created lazily
+
+    # ----- collection management -----
+    def ensure_collection(
+        self,
+        *,
+        create_if_missing: bool,
+        distance: object = None,            # ignored by Chroma
+        vector_size: Optional[int] = None,  # ignored (we trust the embedder dim)
+    ) -> None:
+        name = self._require_collection()
+        self._col = self._client.get_or_create_collection(name)
+
+    # ----- payload index helpers (no-ops) -----
+    def create_payload_index(self, field_name: str, field_type: str) -> None:
+        return
+
+    def ensure_payload_indices(self, schema: Dict[str, str]) -> None:
+        return
+
+    # ----- ingest -----
+    def ingest(
+        self,
+        items: Sequence[IngestItem],
+        *,
+        batch_size: int = 64,
+        payload_keys: Optional[Set[str]] = None,
+        include_embed_in_payload: bool = False,
+    ) -> int:
+        if not items:
+            return 0
+
+        col = self._get_collection()
+        written = 0
+        buf: List[IngestItem] = []
+
+        def flush() -> None:
+            nonlocal written, buf
+            if not buf:
+                return
+
+            texts: List[str] = []
+            metadatas: List[Dict[str, Any]] = []
+            ids: List[str] = []
+            for it in buf:
+                txt = getattr(it, it.embed_field, None)
+                if not txt or not str(txt).strip():
+                    raise ValueError(
+                        f"Record missing text in embed_field='{it.embed_field}'. "
+                        f"Available keys: {[k for k, v in it.model_dump().items() if v is not None]}"
+                    )
+                texts.append(str(txt))
+
+                payload = it.model_dump(exclude_none=True)
+                payload.pop("embed_field", None)
+                if not include_embed_in_payload:
+                    payload.pop(it.embed_field, None)
+                if payload_keys is not None:
+                    payload = {k: payload.get(k) for k in payload_keys if k in payload}
+
+                metadatas.append(payload)
+                ids.append(str(uuid4()))
+
+            vectors = self.embedder.encode(texts)
+            col.add(ids=ids, embeddings=vectors, metadatas=metadatas, documents=None)
+            written += len(buf)
+            buf = []
+
+        for it in items:
+            buf.append(it)
+            if len(buf) >= batch_size:
+                flush()
+        flush()
+        return written
+
+    # ----- search -----
+    def search(self, query: str, *, top_k: int = 5) -> List[RetrievalResult]:
+        col = self._get_collection()
+        qv = self.embedder.encode([query])[0]
+        res = col.query(query_embeddings=[qv], n_results=top_k)
+        ids = res.get("ids", [[]])[0]
+        metas = res.get("metadatas", [[]])[0]
+        dists = res.get("distances", [[]])[0] if res.get("distances") else [0.0] * len(ids)
+
+        out: List[RetrievalResult] = []
+        for i, _id in enumerate(ids):
+            payload = metas[i] if i < len(metas) else {}
+            score = float(dists[i]) if i < len(dists) else 0.0
+            out.append(RetrievalResult(id=str(_id), score=score, payload=payload))
+        return out
+
+    # ----- hybrid search with filter -----
+    def search_filtered(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        query_filter: Union[dict, object],
+    ) -> List[RetrievalResult]:
+        col = self._get_collection()
+        qv = self.embedder.encode([query])[0]
+        where = self._to_chroma_where(query_filter)
+        res = col.query(query_embeddings=[qv], n_results=top_k, where=where)
+        ids = res.get("ids", [[]])[0]
+        metas = res.get("metadatas", [[]])[0]
+        dists = res.get("distances", [[]])[0] if res.get("distances") else [0.0] * len(ids)
+
+        out: List[RetrievalResult] = []
+        for i, _id in enumerate(ids):
+            payload = metas[i] if i < len(metas) else {}
+            score = float(dists[i]) if i < len(dists) else 0.0
+            out.append(RetrievalResult(id=str(_id), score=score, payload=payload))
+        return out
+
+    # ----- payload-only retrieval -----
+    def scroll_filter(
+        self,
+        *,
+        query_filter: Union[dict, object],
+        limit: int = 100,
+        offset: Optional[str] = None,   # Chroma doesn't use offsets; we ignore it
+    ) -> Tuple[List[RetrievalResult], Optional[str]]:
+        col = self._get_collection()
+        where = self._to_chroma_where(query_filter)
+        res = col.get(where=where, limit=limit)
+        ids = res.get("ids", [])
+        metas = res.get("metadatas", []) or []
+
+        results: List[RetrievalResult] = []
+        for i, _id in enumerate(ids):
+            payload = metas[i] if i < len(metas) else {}
+            results.append(RetrievalResult(id=str(_id), score=0.0, payload=payload))
+        return results, None  # no pagination token
+
+    # ----- Mongo mirror -----
+    def mirror_to_mongo(
+        self,
+        *,
+        mongo_uri: str,
+        mongo_db: str,
+        mongo_coll: str,
+        mongo_keys: Optional[Set[str]] = None,
+        batch_size: int = 1000,
+        max_docs: Optional[int] = None,
+    ) -> int:
+        raise NotImplementedError("Mongo mirroring is only supported for the Qdrant backend.")
+
+    # ----- helpers -----
+    def _get_collection(self):
+        if self._col is None:
+            name = self._require_collection()
+            self._col = self._client.get_or_create_collection(name)
+        return self._col
+
+    def _require_collection(self) -> str:
+        if not self.collection or not str(self.collection).strip():
+            raise RuntimeError(
+                "No collection configured. Pass `collection` when constructing QMem "
+                "or set `default_collection` in QMemConfig."
+            )
+        return str(self.collection)
+
+    def _to_chroma_where(self, query_filter: Union[dict, object]) -> Dict[str, Any]:
+        """
+        Map a subset of qdrant-style filter JSON to Chroma where:
+          - must:     AND of conditions
+          - must_not: negations via $ne / $nin
+          - should:   OR group via $or (best-effort)
+          - match:    {"key":k,"match":{"value":v}}      -> {k: v}
+          - match-any {"key":k,"match":{"any":[...]}}    -> {k: {"$in":[...]}}
+          - range:    {"key":k,"range":{"gte":A,...}}    -> {k: {"$gte":A,...}}
+        Unsupported: geo/has_id, complex nesting beyond simple $or/$in.
+        """
+        if not isinstance(query_filter, dict):
+            return {}
+        must = query_filter.get("must", []) or []
+        must_not = query_filter.get("must_not", []) or []
+        should = query_filter.get("should", []) or []
+
+        def cond_to_where(c: dict) -> Dict[str, Any]:
+            if "key" in c and "match" in c:
+                key = c["key"]
+                m = c["match"] or {}
+                if isinstance(m, dict) and "any" in m:
+                    return {key: {"$in": list(m["any"])}}
+                if isinstance(m, dict) and "value" in m:
+                    return {key: m["value"]}
+                return {key: m}
+            if "key" in c and "range" in c:
+                key = c["key"]
+                r = c["range"] or {}
+                w: Dict[str, Any] = {}
+                for a, b in (("gte", "$gte"), ("gt", "$gt"), ("lte", "$lte"), ("lt", "$lt")):
+                    if a in r:
+                        w[b] = r[a]
+                return {key: w} if w else {}
+            return {}
+
+        where: Dict[str, Any] = {}
+        for c in must:
+            where.update(cond_to_where(c))
+
+        for c in must_not:
+            d = cond_to_where(c)
+            for k, v in d.items():
+                if isinstance(v, dict) and "$in" in v:
+                    where[k] = {"$nin": v["$in"]}
+                else:
+                    where[k] = {"$ne": v}
+
+        if should:
+            ors = [cond_to_where(c) for c in should if cond_to_where(c)]
+            if ors:
+                where = {"$or": [where] + ors} if where else {"$or": ors}
+
+        return where
+
+
+# =============================================================================
+# Public façade that selects backend by cfg.vector_store
+# =============================================================================
+class QMem:
+    """
+    Facade over Qdrant (cloud) and Chroma (local) backends with the same methods:
+      - ensure_collection
+      - create_payload_index / ensure_payload_indices
+      - ingest
+      - search / search_filtered
+      - scroll_filter
+      - mirror_to_mongo (Qdrant only)
+    """
+
+    def __init__(self, cfg: QMemConfig, collection: Optional[str] = None) -> None:
+        self._backend = (getattr(cfg, "vector_store", "qdrant") or "qdrant").lower()
+        if self._backend == "chroma":
+            self._impl = _QMemChroma(cfg, collection)
+        else:
+            self._impl = _QMemQdrant(cfg, collection)
+
+    # Delegate all methods 1:1
+
+    def ensure_collection(self, **kw) -> None:
+        return self._impl.ensure_collection(**kw)
+
+    def create_payload_index(self, *a, **kw) -> None:
+        return self._impl.create_payload_index(*a, **kw)
+
+    def ensure_payload_indices(self, *a, **kw) -> None:
+        return self._impl.ensure_payload_indices(*a, **kw)
+
+    def ingest(self, *a, **kw) -> int:
+        return self._impl.ingest(*a, **kw)
+
+    def search(self, *a, **kw) -> List[RetrievalResult]:
+        return self._impl.search(*a, **kw)
+
+    def search_filtered(self, *a, **kw) -> List[RetrievalResult]:
+        return self._impl.search_filtered(*a, **kw)
+
+    def scroll_filter(self, *a, **kw) -> Tuple[List[RetrievalResult], Optional[str]]:
+        return self._impl.scroll_filter(*a, **kw)
+
+    def mirror_to_mongo(self, *a, **kw) -> int:
+        return self._impl.mirror_to_mongo(*a, **kw)

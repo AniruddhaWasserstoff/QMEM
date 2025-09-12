@@ -2,13 +2,18 @@
 qmem
 ----
 
-Lightweight client for embedding, ingesting, and retrieving records from Qdrant.
+Lightweight client for embedding, ingesting, and retrieving records from a vector
+store, with pluggable backends:
+
+- **Qdrant (cloud API)** — default when configured.
+- **Chroma (local, persisted under ./.qmem/chroma by default)**.
 
 Public API:
-- QMem: main client
+- QMem: main client (routes to the configured backend)
 - IngestItem, RetrievalResult: data models
 - QMemConfig: configuration model
-- create / ingest / retrieve: module-level helpers with sensible defaults
+- create / ingest / retrieve / filter / retrieve_filter: module-level helpers
+- mongo: mirror payloads from a Qdrant collection to MongoDB (Qdrant-only)
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ from .api import (
     ingest_from_file as _api_ingest_from_file,
     retrieve as _api_retrieve,
     retrieve_by_filter as _api_retrieve_by_filter,
-    mongo as _api_mongo,  # NEW
+    mongo as _api_mongo,  # Qdrant-only
 )
 
 __all__ = (
@@ -42,7 +47,7 @@ __all__ = (
     "retrieve",
     "filter",
     "retrieve_filter",
-    "mongo",              # NEW
+    "mongo",
     "format_results_table",
     "__version__",
 )
@@ -55,7 +60,7 @@ try:
     __version__: str = _metadata.version("qmem")
 except _metadata.PackageNotFoundError:
     # Fallback for editable/local use
-    __version__ = "0.1.4"
+    __version__ = "0.1.5"  # bumped for dual-backend support
 
 # -----------------------------
 # Defaults & state
@@ -143,10 +148,7 @@ def format_results_table(
     else:
         keys = list(show_keys)
 
-    # Decide column widths:
-    # - "#"   -> 2
-    # - "score" -> 5
-    # - payload cols: first gets max(20, max_query_len) to keep a wide lead column; others use max(20, max_resp_len)
+    # Decide column widths
     first_payload_w = max(20, max_query_len) if keys else 0
     payload_widths = [(first_payload_w if i == 0 else max(20, max_resp_len)) for i in range(len(keys))]
 
@@ -301,14 +303,15 @@ def filter(
     collection_name: Optional[str] = None,
     as_table: bool = True,
     cfg: Optional[QMemConfig] = None,
-    show: Optional[Sequence[str]] = None,   # NEW: choose payload columns; None -> ALL
+    show: Optional[Sequence[str]] = None,   # choose payload columns; None -> ALL
 ) -> Union[str, List[RetrievalResult]]:
     """
     qm.filter(filter_json={...} | 'latest' | 'path/to/file.json', limit=100, show=['title','type'])
     Payload-only results by default; prints a table WITHOUT the score column.
     """
     coll = _ensure_collection_set(collection_name)
-    filt = _resolve_filter_arg(filter_json)
+    from .__init__ import _resolve_filter_arg as _resolve  # avoid circular import issues in certain setups
+    filt = _resolve(filter_json)
     results = _api_retrieve_by_filter(coll, filter=filt, k=limit, query=None, cfg=cfg)
     return format_results_table(results, show_score=False, show_keys=show) if as_table else results
 
@@ -321,7 +324,7 @@ def retrieve_filter(
     collection_name: Optional[str] = None,
     as_table: bool = True,
     cfg: Optional[QMemConfig] = None,
-    show: Optional[Sequence[str]] = None,   # NEW: choose payload columns; None -> ALL
+    show: Optional[Sequence[str]] = None,   # choose payload columns; None -> ALL
 ) -> Union[str, List[RetrievalResult]]:
     """
     qm.retrieve_filter(query, filter_json={...} | 'latest' | 'path/to/file.json', top_k=5, show=['title','type'])
@@ -330,13 +333,14 @@ def retrieve_filter(
     if not query:
         raise ValueError("query is required")
     coll = _ensure_collection_set(collection_name)
-    filt = _resolve_filter_arg(filter_json)
+    from .__init__ import _resolve_filter_arg as _resolve  # avoid circular import issues
+    filt = _resolve(filter_json)
     results = _api_retrieve_by_filter(coll, filter=filt, k=top_k, query=query, cfg=cfg)
     return format_results_table(results, show_score=False, show_keys=show) if as_table else results
 
 
 # -----------------------------
-# NEW: programmatic Mongo mirror helper
+# Mongo mirror helper (Qdrant-only)
 # -----------------------------
 def mongo(
     *,

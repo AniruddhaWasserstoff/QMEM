@@ -16,7 +16,7 @@ __all__ = [
     "ingest_from_file",
     "retrieve",
     "retrieve_by_filter",
-    "mongo",  # NEW: mirror existing Qdrant collection -> MongoDB
+    "mongo",  # mirror existing collection -> MongoDB (Qdrant backend only)
 ]
 
 # -----------------------------
@@ -96,18 +96,19 @@ def create(
     distance: Union[str, qmodels.Distance] = "cosine",
 ) -> None:
     """
-    Create a collection in Qdrant if it doesn't already exist.
+    Create a collection if it doesn't already exist.
 
     Behavior:
       - If `dim` is provided, it overrides `cfg.embed_dim`, is persisted to config,
-        and both the collection vector size and embedder dimension will use this value.
+        and both the collection vector size (Qdrant) and embedder dimension will use this value.
       - If `dim` is omitted, falls back to `cfg.embed_dim` (or 1536 if unset).
+      - `distance` applies to Qdrant only (ignored for Chroma).
 
     Args:
         collection: Collection name.
         cfg: Optional QMemConfig; loaded from CONFIG_PATH if not provided.
         dim: Vector size; overrides and persists cfg.embed_dim when provided.
-        distance: "cosine" | "dot" | "euclid" (or qmodels.Distance).
+        distance: "cosine" | "dot" | "euclid" (or qmodels.Distance). Qdrant only.
     """
     cfg = cfg or QMemConfig.load(CONFIG_PATH)
 
@@ -120,31 +121,35 @@ def create(
             cfg.embed_dim = vec_dim
             cfg.save(CONFIG_PATH)  # persist so the embedder and future ops match
 
-    # Normalize distance
-    if isinstance(distance, str):
-        key = distance.strip().lower()
-        if key not in _DISTANCE:
-            raise ValueError(f"Invalid distance: {distance!r}. Choose from: {', '.join(_DISTANCE)}")
-        dist = _DISTANCE[key]
-    else:
-        dist = distance
-
     # Build client AFTER cfg.embed_dim may have been updated, so embedder matches
     q = QMem(cfg, collection=collection)
+    backend = getattr(q, "_backend", "qdrant")
 
     # If the collection already exists, nothing to do
     try:
-        q.client.get_collection(collection)
+        q.ensure_collection(create_if_missing=False)
         return
     except Exception:
         pass
 
-    # Create with the resolved dimension & distance
-    q.ensure_collection(
-        create_if_missing=True,
-        distance=dist,
-        vector_size=vec_dim,
-    )
+    if backend == "qdrant":
+        # Normalize distance
+        if isinstance(distance, str):
+            key = distance.strip().lower()
+            if key not in _DISTANCE:
+                raise ValueError(f"Invalid distance: {distance!r}. Choose from: {', '.join(_DISTANCE)}")
+            dist = _DISTANCE[key]
+        else:
+            dist = distance
+
+        q.ensure_collection(
+            create_if_missing=True,
+            distance=dist,
+            vector_size=vec_dim,
+        )
+    else:
+        # Chroma ignores distance/vector size; ensure/create collection
+        q.ensure_collection(create_if_missing=True)
 
 
 def ingest(
@@ -175,7 +180,12 @@ def ingest(
 
     cfg = cfg or QMemConfig.load(CONFIG_PATH)
     q = QMem(cfg, collection=collection)
-    q.client.get_collection(collection)  # ensure exists
+
+    # Ensure exists (no creation here)
+    try:
+        q.ensure_collection(create_if_missing=False)
+    except Exception as e:
+        raise RuntimeError(f"No such collection: {collection}") from e
 
     items = _items(records, embed_field)
     return q.ingest(
@@ -246,7 +256,12 @@ def retrieve(
 
     cfg = cfg or QMemConfig.load(CONFIG_PATH)
     q = QMem(cfg, collection=collection)
-    q.client.get_collection(collection)  # ensure exists
+
+    try:
+        q.ensure_collection(create_if_missing=False)
+    except Exception as e:
+        raise RuntimeError(f"No such collection: {collection}") from e
+
     return q.search(query, top_k=k)
 
 
@@ -266,7 +281,11 @@ def retrieve_by_filter(
     """
     cfg = cfg or QMemConfig.load(CONFIG_PATH)
     q = QMem(cfg, collection=collection)
-    q.client.get_collection(collection)  # ensure exists
+
+    try:
+        q.ensure_collection(create_if_missing=False)
+    except Exception as e:
+        raise RuntimeError(f"No such collection: {collection}") from e
 
     if query:
         return q.search_filtered(query, top_k=k, query_filter=filter)
@@ -276,7 +295,7 @@ def retrieve_by_filter(
 
 
 # -----------------------------
-# NEW: programmatic Mongo mirror
+# Programmatic Mongo mirror
 # -----------------------------
 
 def mongo(
@@ -291,16 +310,16 @@ def mongo(
     cfg: Optional[QMemConfig] = None,
 ) -> int:
     """
-    Mirror an existing Qdrant collection's payloads into MongoDB.
+    Mirror an existing collection's payloads into MongoDB (Qdrant backend only).
 
     Args:
-        collection_name: Qdrant collection to read from (must already exist).
+        collection_name: Source collection to read from (must already exist).
         fields: Subset of payload keys to store in Mongo.
                 None or empty => mirror FULL payload.
         mongo_uri: Mongo connection string.
         mongo_db: Target Mongo database.
         mongo_collection: Target collection (defaults to collection_name).
-        batch_size: Qdrant scroll page size (performance/memory trade-off).
+        batch_size: Scroll page size (performance/memory trade-off).
         max_docs: Optional total cap on mirrored documents (None = all).
         cfg: Optional QMemConfig; loaded from CONFIG_PATH if not provided.
 
@@ -309,10 +328,14 @@ def mongo(
     """
     cfg = cfg or QMemConfig.load(CONFIG_PATH)
     q = QMem(cfg, collection=collection_name)
+    backend = getattr(q, "_backend", "qdrant")
+
+    if backend == "chroma":
+        raise RuntimeError("Mongo mirroring is supported only for the Qdrant backend.")
 
     # Ensure the source collection exists
     try:
-        q.client.get_collection(collection_name)
+        q.ensure_collection(create_if_missing=False)
     except Exception as e:
         raise RuntimeError(f"No such Qdrant collection: {collection_name}") from e
 

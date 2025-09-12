@@ -17,11 +17,10 @@ from rich.table import Table
 from .client import QMem
 from .config import CONFIG_PATH, QMemConfig, FILTERS_DIR
 from .schemas import IngestItem
-from . import format_results_table  # shared table formatter
 
 __all__ = ["app"]
 
-app = typer.Typer(help="qmem — Memory for ingestion & retrieval")
+app = typer.Typer(help="qmem — Memory for ingestion & retrieval (Qdrant cloud or Chroma local)")
 console = Console()
 
 # -----------------------------
@@ -60,8 +59,16 @@ def _read_records(path: Path) -> List[dict]:
 
 
 def _ensure_collection_exists(q: QMem, name: str) -> None:
+    """
+    For Qdrant: verify collection exists (no creation). For Chroma: collections are lazy / created on first use,
+    so we skip existence check to avoid creating as a side-effect.
+    """
+    backend = getattr(q, "_backend", "qdrant")
+    if backend == "chroma":
+        return  # no-op; Chroma collections are created on first use
     try:
-        q.client.get_collection(name)
+        # Qdrant check
+        q.ensure_collection(create_if_missing=False)
     except Exception:
         _fail(f"No such collection: {name}")
 
@@ -257,16 +264,36 @@ def _build_filter_interactive() -> dict:
 # init
 # -----------------------------
 
-@app.command("init", help="Configure keys + embedding model (saved to ./.qmem/config.toml)")
+@app.command("init", help="Configure backend (Qdrant/Chroma), keys + embedding model (saved to ./.qmem/config.toml)")
 def init_cmd() -> None:
     cfg_path = CONFIG_PATH
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
 
-    console.print("qmem init — set keys and choose embedding provider/model", style="bold")
+    console.print("qmem init — backend, keys, and embedding provider/model", style="bold")
 
-    # Qdrant first (unchanged)
-    qdrant_url = Prompt.ask("Qdrant URL (e.g., https://xxxx.cloud.qdrant.io)")
-    qdrant_key = Prompt.ask("Qdrant API key", password=True)
+    # 0) Backend selection
+    vector_store = qs.select(
+        "Choose vector store backend:",
+        choices=[
+            qs.Choice("qdrant", checked=True),
+            qs.Choice("chroma", checked=False),
+        ],
+        pointer="➤",
+        use_shortcuts=False,
+    ).ask()
+
+    # Qdrant (cloud) or Chroma (local path)
+    qdrant_url = ""
+    qdrant_key = ""
+    chroma_path = ""
+
+    if vector_store == "qdrant":
+        qdrant_url = Prompt.ask("Qdrant URL (e.g., https://xxxx.cloud.qdrant.io)")
+        qdrant_key = Prompt.ask("Qdrant API key", password=True)
+    else:
+        chroma_path = Prompt.ask(
+            "Local Chroma path (blank = ./.qmem/chroma)", default="", show_default=False
+        ) or str((CONFIG_PATH.parent / "chroma").resolve())
 
     # 1) Provider
     provider = qs.select(
@@ -356,8 +383,10 @@ def init_cmd() -> None:
 
     # 4) Save config
     cfg = QMemConfig(
-        qdrant_url=qdrant_url,
-        qdrant_api_key=qdrant_key,
+        vector_store=vector_store,
+        chroma_path=(chroma_path or None),
+        qdrant_url=qdrant_url or "http://localhost:6333",
+        qdrant_api_key=qdrant_key or "",
         openai_api_key=(openai_key or None),
         hf_api_key=(hf_key or None),
         gemini_api_key=(gemini_key or None),
@@ -374,7 +403,7 @@ def init_cmd() -> None:
 # create
 # -----------------------------
 
-@app.command("create", help="Create a Qdrant collection interactively")
+@app.command("create", help="Create a collection interactively")
 def create_collection(
     collection: Optional[str] = typer.Option(None, "--collection", "-c", help="Collection name"),
     dim: Optional[int] = typer.Option(None, "--dim", help="Vector size"),
@@ -382,45 +411,52 @@ def create_collection(
         None,
         "--distance",
         "-d",
-        help="Distance metric: cosine|dot|euclid (if omitted, you'll be prompted)",
+        help="Distance metric: cosine|dot|euclid (Qdrant only; ignored for Chroma)",
     ),
 ) -> None:
     cfg = QMemConfig.load(CONFIG_PATH)
     collection = collection or Prompt.ask("collection_name")
     q = QMem(cfg, collection=collection)
 
-    # exists?
-    try:
-        q.client.get_collection(collection)
-        console.print(f"[yellow]Collection already exists:[/yellow] {collection}")
-        return
-    except Exception:
-        pass
+    backend = getattr(q, "_backend", "qdrant")
+    if backend == "qdrant":
+        # Try to see if exists
+        try:
+            # Will raise if not exists and create_if_missing=False
+            q.ensure_collection(create_if_missing=False)
+            console.print(f"[yellow]Collection already exists:[/yellow] {collection}")
+            return
+        except Exception:
+            pass
 
     dim = dim or IntPrompt.ask("Embedding vector size for this collection", default=cfg.embed_dim or 1024)
 
-    # NEW: persist chosen dim to config, to keep CLI consistent with qm.create(...)
+    # Persist chosen dim to config for consistency
     if cfg.embed_dim != dim:
         cfg.embed_dim = dim
         cfg.save(CONFIG_PATH)
 
-    # If not supplied via flag, ask interactively
+    # Distance selection (Qdrant only)
     dist_key = distance.strip().lower() if distance else None
-    if not dist_key:
-        dist_key = qs.select(
-            "Distance metric:",
-            choices=list(_DISTANCE_MAP.keys()),
-            pointer="➤",
-            use_shortcuts=False,
-            default="cosine",
-        ).ask()
+    if backend == "qdrant":
+        if not dist_key:
+            dist_key = qs.select(
+                "Distance metric:",
+                choices=list(_DISTANCE_MAP.keys()),
+                pointer="➤",
+                use_shortcuts=False,
+                default="cosine",
+            ).ask()
 
-    if dist_key not in _DISTANCE_MAP:
-        _fail(f"Invalid distance: {dist_key!r}. Choose from: {', '.join(_DISTANCE_MAP)}")
+        if dist_key not in _DISTANCE_MAP:
+            _fail(f"Invalid distance: {dist_key!r}. Choose from: {', '.join(_DISTANCE_MAP)}")
 
-    q.ensure_collection(create_if_missing=True, distance=_DISTANCE_MAP[dist_key], vector_size=dim)
-    console.print(f"[green]Collection created:[/green] {collection} (dim={dim}, distance={dist_key})")
-
+        q.ensure_collection(create_if_missing=True, distance=_DISTANCE_MAP[dist_key], vector_size=dim)
+        console.print(f"[green]Collection created:[/green] {collection} (dim={dim}, distance={dist_key})")
+    else:
+        # Chroma ignores distance & vector size; we still record dim in config for the embedder
+        q.ensure_collection(create_if_missing=True)
+        console.print(f"[green]Collection ready (Chroma):[/green] {collection} (dim={dim}, distance=ignored)")
 
 # -----------------------------
 # ingest
@@ -544,7 +580,7 @@ def retrieve(
 
     for i, r in enumerate(results, 1):
         payload = r.payload or {}
-        row = [str(i), f"{r.score:.4f}"] + [_truncate(payload.get(k)) for k in show_keys]
+        row = [str(i), f"{r.score:.4f}"] + [str(payload.get(k, "")).replace("\n", " ") for k in show_keys]
         table.add_row(*row)
 
     console.print(table)
@@ -618,7 +654,18 @@ def filter_cmd() -> None:
                     freq[key] += 1
         show_keys = [k for k, _ in sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))]
 
-    console.print(format_results_table(results, show_score=False, show_keys=show_keys))
+    # Rich table rendering
+    table = Table(title=f"Filtered results (limit {limit})", box=box.ROUNDED)
+    table.add_column("#", justify="right")
+    for key in show_keys:
+        table.add_column(key)
+
+    for i, r in enumerate(results, 1):
+        payload = r.payload or {}
+        row = [str(i)] + [str(payload.get(k, "")).replace("\n", " ") for k in show_keys]
+        table.add_row(*row)
+
+    console.print(table)
 
 
 # -----------------------------
@@ -669,14 +716,25 @@ def retrieve_filter_cmd() -> None:
                     freq[key] += 1
         show_keys = [k for k, _ in sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))]
 
-    console.print(format_results_table(results, show_score=False, show_keys=show_keys))
+    # Rich table rendering
+    table = Table(title=f"Top {topk} results (filtered)", box=box.ROUNDED)
+    table.add_column("#", justify="right")
+    for key in show_keys:
+        table.add_column(key)
+
+    for i, r in enumerate(results, 1):
+        payload = r.payload or {}
+        row = [str(i)] + [str(payload.get(k, "")).replace("\n", " ") for k in show_keys]
+        table.add_row(*row)
+
+    console.print(table)
 
 
 # -----------------------------
 # index (interactive payload index creation)
 # -----------------------------
 
-@app.command("index", help="Create payload indexes (interactive)")
+@app.command("index", help="Create payload indexes (Qdrant only; Chroma doesn't require indexes)")
 def index_cmd() -> None:
     """
     Interactively create Qdrant payload indexes for fields you plan to filter on.
@@ -685,6 +743,11 @@ def index_cmd() -> None:
     cfg = QMemConfig.load(CONFIG_PATH)
     collection = Prompt.ask("collection_name")
     q = QMem(cfg, collection=collection)
+
+    if getattr(q, "_backend", "qdrant") == "chroma":
+        console.print("[yellow]Chroma backend selected — no payload indexes are required or supported.[/yellow]")
+        raise typer.Exit(code=0)
+
     _ensure_collection_exists(q, collection)
 
     console.print("Add fields to index. Leave name empty to finish.", style="bold")
@@ -735,11 +798,16 @@ def index_cmd() -> None:
 # mongo (mirror an existing Qdrant collection → MongoDB)
 # -----------------------------
 
-@app.command("mongo", help="Mirror an existing Qdrant collection's payloads into MongoDB")
+@app.command("mongo", help="Mirror an existing Qdrant collection's payloads into MongoDB (Qdrant backend only)")
 def mongo_cmd() -> None:
     cfg = QMemConfig.load(CONFIG_PATH)
     collection = Prompt.ask("collection_name")
     q = QMem(cfg, collection=collection)
+
+    if getattr(q, "_backend", "qdrant") == "chroma":
+        console.print("[yellow]Mongo mirroring is not supported for the Chroma backend.[/yellow]")
+        raise typer.Exit(code=0)
+
     _ensure_collection_exists(q, collection)
 
     console.print("[bold]Discovering payload fields (sampling up to 200 docs)...[/bold]")
