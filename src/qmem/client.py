@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import logging as log
@@ -533,7 +534,10 @@ class _QMemChroma:
         col = self._get_collection()
         qv = self.embedder.encode([query])[0]
         where = self._to_chroma_where(query_filter)
-        res = col.query(query_embeddings=[qv], n_results=top_k, where=where)
+        if where:
+            res = col.query(query_embeddings=[qv], n_results=top_k, where=where)
+        else:
+            res = col.query(query_embeddings=[qv], n_results=top_k)
         ids = res.get("ids", [[]])[0]
         metas = res.get("metadatas", [[]])[0]
         dists = res.get("distances", [[]])[0] if res.get("distances") else [0.0] * len(ids)
@@ -551,11 +555,18 @@ class _QMemChroma:
         *,
         query_filter: Union[dict, object],
         limit: int = 100,
-        offset: Optional[str] = None,   # Chroma doesn't use offsets; we ignore it
+        offset: Optional[str] = None,   # Chroma uses integer offsets
     ) -> Tuple[List[RetrievalResult], Optional[str]]:
         col = self._get_collection()
         where = self._to_chroma_where(query_filter)
-        res = col.get(where=where, limit=limit)
+
+        # Chroma expects `where` to have at least one operator; if empty, omit it.
+        off = int(offset) if isinstance(offset, (int, str)) and str(offset).isdigit() else 0
+        if where:
+            res = col.get(where=where, limit=limit, offset=off)
+        else:
+            res = col.get(limit=limit, offset=off)
+
         ids = res.get("ids", [])
         metas = res.get("metadatas", []) or []
 
@@ -563,7 +574,10 @@ class _QMemChroma:
         for i, _id in enumerate(ids):
             payload = metas[i] if i < len(metas) else {}
             results.append(RetrievalResult(id=str(_id), score=0.0, payload=payload))
-        return results, None  # no pagination token
+
+        # Next offset for simple pagination
+        next_off = off + len(ids)
+        return results, (str(next_off) if ids else None)
 
     # ----- Mongo mirror -----
     def mirror_to_mongo(
@@ -576,7 +590,61 @@ class _QMemChroma:
         batch_size: int = 1000,
         max_docs: Optional[int] = None,
     ) -> int:
-        raise NotImplementedError("Mongo mirroring is only supported for the Qdrant backend.")
+        """
+        Mirror all (or up to max_docs) points from the current Chroma collection into MongoDB.
+
+        Notes:
+        - Uses collection.get() with limit/offset pagination.
+        - Only metadatas (payloads) are mirrored; vectors/documents are not stored in Mongo.
+        """
+        col = self._get_collection()
+
+        # Init sink (short-lived per call)
+        try:
+            from .mongo_sink import MongoSink  # lazy import
+            sink = MongoSink(mongo_uri, mongo_db)
+        except Exception as e:
+            raise RuntimeError(f"Could not initialize Mongo sink: {e}") from e
+
+        stored = 0
+        offset = 0
+
+        while True:
+            # No filter when mirroring everything; don't pass empty where.
+            res = col.get(limit=batch_size, offset=offset)
+            ids = res.get("ids", []) or []
+            metas = res.get("metadatas", []) or []
+
+            if not ids:
+                break
+
+            docs: List[Dict[str, Any]] = []
+            for i, _id in enumerate(ids):
+                pl = metas[i] if i < len(metas) else {}
+                if mongo_keys is None:
+                    doc = dict(pl) if isinstance(pl, dict) else {}
+                else:
+                    doc = {k: pl.get(k) for k in mongo_keys if isinstance(pl, dict) and k in pl}
+                doc["_id"] = str(_id)
+                docs.append(doc)
+
+            if docs:
+                try:
+                    sink.insert_many(mongo_coll, docs)
+                    stored += len(docs)
+                except Exception as e:
+                    logger.warning("Mongo insert failed for a batch: %s", e)
+
+            offset += len(ids)
+            if max_docs is not None and stored >= max_docs:
+                break
+
+        try:
+            sink.close()
+        except Exception:
+            pass
+
+        return stored
 
     # ----- helpers -----
     def _get_collection(self):
@@ -660,7 +728,7 @@ class QMem:
       - ingest
       - search / search_filtered
       - scroll_filter
-      - mirror_to_mongo (Qdrant only)
+      - mirror_to_mongo  (supported for both backends)
     """
 
     def __init__(self, cfg: QMemConfig, collection: Optional[str] = None) -> None:

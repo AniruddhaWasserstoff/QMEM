@@ -286,7 +286,6 @@ def init_cmd() -> None:
     qdrant_url = ""
     qdrant_key = ""
     chroma_path = ""
-
     if vector_store == "qdrant":
         qdrant_url = Prompt.ask("Qdrant URL (e.g., https://xxxx.cloud.qdrant.io)")
         qdrant_key = Prompt.ask("Qdrant API key", password=True)
@@ -795,19 +794,16 @@ def index_cmd() -> None:
 
 
 # -----------------------------
-# mongo (mirror an existing Qdrant collection → MongoDB)
+# mongo (mirror an existing collection → MongoDB)
 # -----------------------------
 
-@app.command("mongo", help="Mirror an existing Qdrant collection's payloads into MongoDB (Qdrant backend only)")
+@app.command("mongo", help="Mirror an existing collection's payloads into MongoDB (Qdrant or Chroma backend)")
 def mongo_cmd() -> None:
     cfg = QMemConfig.load(CONFIG_PATH)
     collection = Prompt.ask("collection_name")
     q = QMem(cfg, collection=collection)
 
-    if getattr(q, "_backend", "qdrant") == "chroma":
-        console.print("[yellow]Mongo mirroring is not supported for the Chroma backend.[/yellow]")
-        raise typer.Exit(code=0)
-
+    # Allow both backends now (Qdrant and Chroma)
     _ensure_collection_exists(q, collection)
 
     console.print("[bold]Discovering payload fields (sampling up to 200 docs)...[/bold]")
@@ -847,7 +843,7 @@ def mongo_cmd() -> None:
     ) or collection
 
     confirm = Prompt.ask(
-        "Mirror ALL points from Qdrant → Mongo? (y/N)", default="y"
+        "Mirror ALL points from the selected backend → Mongo? (y/N)", default="y"
     )
     if not (confirm or "").lower().startswith("y"):
         console.print("[yellow]Aborted.[/yellow]")
@@ -861,7 +857,7 @@ def mongo_cmd() -> None:
         mongo_db=mongo_db,
         mongo_coll=mongo_coll,
         mongo_keys=mongo_keys,
-        batch_size=1000,  # scroll batch size
+        batch_size=1000,  # backend-specific page size
     )
     console.print(
         f"[green]Mirrored[/green] {total} documents to Mongo (db={mongo_db}, coll={mongo_coll})."
