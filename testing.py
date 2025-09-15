@@ -7,7 +7,7 @@ qm.create(collection_name="testing", dim=1024, distance_metric="cosine")
 qm.ingest(
     file="/home/aniruddha/Desktop/qmem/data.jsonl",
     embed_field="query", # optional, keep these fields in payload
-    
+    #payload_field=""
 )
 
 #Retrieve results (pretty table by default)
