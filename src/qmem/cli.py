@@ -751,25 +751,19 @@ def index_cmd() -> None:
 
     console.print("Add fields to index. Leave name empty to finish.", style="bold")
 
-    schema: Dict[str, qmodels.PayloadSchemaType] = {}
-    type_map = {
-        "keyword": qmodels.PayloadSchemaType.KEYWORD,
-        "integer": qmodels.PayloadSchemaType.INTEGER,
-        "float": qmodels.PayloadSchemaType.FLOAT,
-        "bool": qmodels.PayloadSchemaType.BOOL,
-    }
-
+    schema: Dict[str, str] = {}
+    type_choices = ["keyword", "integer", "float", "bool"]
     while True:
         fname = Prompt.ask("Field name (blank to finish)", default="", show_default=False).strip()
         if not fname:
             break
         itype = qs.select(
             f"Index type for '{fname}':",
-            choices=["keyword", "integer", "float", "bool"],
+            choices=type_choices,
             pointer="➤",
             use_shortcuts=False,
         ).ask()
-        schema[fname] = type_map[itype]
+        schema[fname] = itype
 
     if not schema:
         _fail("No fields provided.")
@@ -777,12 +771,7 @@ def index_cmd() -> None:
     created = []
     for field, ftype in schema.items():
         try:
-            q.client.create_payload_index(
-                collection_name=collection,
-                field_name=field,
-                field_schema=ftype,
-                wait=True,
-            )
+            q.create_payload_index(field_name=field, field_type=ftype)
             created.append(field)
         except Exception as e:
             console.print(f"[yellow]Skipped[/yellow] {field}: {e}")
