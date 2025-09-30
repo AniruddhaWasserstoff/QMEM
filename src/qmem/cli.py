@@ -18,6 +18,9 @@ from .client import QMem
 from .config import CONFIG_PATH, QMemConfig, FILTERS_DIR
 from .schemas import IngestItem
 
+# NEW: import cached API wrappers
+from .api import retrieve as api_retrieve, retrieve_by_filter as api_retrieve_by_filter
+
 __all__ = ["app"]
 
 app = typer.Typer(help="qmem — Memory for ingestion & retrieval (Qdrant cloud or Chroma local)")
@@ -550,7 +553,12 @@ def retrieve(
         k = IntPrompt.ask("top_k:", default=k_default)
         console.print(f"[dim]Run options → top_k = {k}{_ann(k, k_default)}[/dim]")
 
-    results = q.search(query, top_k=k)
+    # NEW: use cached API
+    try:
+        results = api_retrieve(collection=collection, query=query, k=k, cfg=cfg)
+    except Exception as e:
+        console.print(f"[red]Request failed:[/red] {e}")
+        raise typer.Exit(code=2)
 
     if json_out:
         console.print_json(data=[r.model_dump() for r in results])
@@ -692,8 +700,15 @@ def retrieve_filter_cmd() -> None:
         saved_path = _save_filter_to_file(filter_json, name)
         console.print(f"[green]Saved filter[/green] → {saved_path}")
 
+    # NEW: use cached API for hybrid search
     try:
-        results = q.search_filtered(query, top_k=topk, query_filter=filter_json)
+        results = api_retrieve_by_filter(
+            collection=collection,
+            filter=filter_json,
+            k=topk,
+            query=query,
+            cfg=cfg,
+        )
     except Exception as e:
         msg = str(e)
         console.print(f"[red]Request failed:[/red] {msg}")
