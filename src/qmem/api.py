@@ -14,6 +14,7 @@ from .schemas import IngestItem, RetrievalResult
 
 # NEW: caching imports
 from .cache import LocalCache, SemanticIndex, make_exact_key
+from .cache import RedisCache  # <-- NEW
 
 __all__ = [
     "create",
@@ -34,11 +35,37 @@ _DISTANCE: Dict[str, qmodels.Distance] = {
     "euclid": qmodels.Distance.EUCLID,
 }
 
-# NEW: module-level exact-key cache (in-memory TTL; overridable via env)
-_LOCAL_CACHE = LocalCache(
-    ttl_sec=int(os.getenv("QMEM_CACHE_TTL", "1800")),   # default 30 minutes
-    max_items=int(os.getenv("QMEM_CACHE_MAX", "5000")),
-)
+# NEW: choose cache backend (env > config > local default)
+def _make_cache() -> LocalCache:
+    """
+    Decide cache backend.
+    Priority:
+      1) env QMEM_CACHE_BACKEND (redis|local)
+      2) config.cache_backend (saved via `qmem init`)
+      3) 'local'
+    """
+    # Try loading config (don't fail if missing during early bootstraps)
+    cfg = None
+    try:
+        cfg = QMemConfig.load(CONFIG_PATH)
+    except Exception:
+        pass
+
+    backend = os.getenv("QMEM_CACHE_BACKEND", (getattr(cfg, "cache_backend", "local"))).lower()
+    ttl = int(os.getenv("QMEM_CACHE_TTL", "1800"))   # default 30 minutes
+
+    if backend == "redis":
+        # Redis ignores max_items; use Redis' own maxmemory policy if configured
+        return RedisCache(ttl_sec=ttl)  # type: ignore[return-value]
+
+    # Local fallback supports max_items knob
+    return LocalCache(
+        ttl_sec=ttl,
+        max_items=int(os.getenv("QMEM_CACHE_MAX", "5000")),
+    )
+
+# Module-level exact-key cache instance
+_LOCAL_CACHE = _make_cache()
 
 
 def _normalize_payload_keys(keys: Optional[Sequence[str]]) -> Optional[Set[str]]:
@@ -147,7 +174,7 @@ def ingest(
     try:
         q.ensure_collection(create_if_missing=False)
     except Exception as e:
-        raise RuntimeError(f"No such collection: {collection}") from e
+        raise RuntimeError(f"No such file or collection: {collection}") from e
     items = _items(records, embed_field)
     return q.ingest(
         items,

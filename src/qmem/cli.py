@@ -274,7 +274,7 @@ def init_cmd() -> None:
 
     console.print("qmem init — backend, keys, and embedding provider/model", style="bold")
 
-    # 0) Backend selection
+    # 0) Vector store backend selection
     vector_store = qs.select(
         "Choose vector store backend:",
         choices=[
@@ -297,7 +297,18 @@ def init_cmd() -> None:
             "Local Chroma path (blank = ./.qmem/chroma)", default="", show_default=False
         ) or str((CONFIG_PATH.parent / "chroma").resolve())
 
-    # 1) Provider
+    # NEW) Cache backend selection
+    cache_backend = qs.select(
+        "Cache backend:",
+        choices=[
+            qs.Choice("local", checked=True),
+            qs.Choice("redis", checked=False),
+        ],
+        pointer="➤",
+        use_shortcuts=False,
+    ).ask()
+
+    # 1) Embedding provider
     provider = qs.select(
         "Embedding provider:",
         choices=["openai", "gemini", "voyage", "minilm"],
@@ -383,10 +394,11 @@ def init_cmd() -> None:
     if dim is None:
         dim = IntPrompt.ask("Embedding dimension", default=default_dim)
 
-    # 4) Save config
+    # 4) Save config (now includes cache_backend)
     cfg = QMemConfig(
         vector_store=vector_store,
         chroma_path=(chroma_path or None),
+        cache_backend=cache_backend,  # <-- NEW
         qdrant_url=qdrant_url or "http://localhost:6333",
         qdrant_api_key=qdrant_key or "",
         openai_api_key=(openai_key or None),

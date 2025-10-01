@@ -30,9 +30,11 @@ _ENV = {
     "embed_model": "QMEM_EMBED_MODEL",
     "embed_dim": "QMEM_EMBED_DIM",
     "default_collection": "QMEM_DEFAULT_COLLECTION",
-    # NEW for backend selection:
-    "vector_store": "QMEM_VECTOR_STORE",  # qdrant | chroma
-    "chroma_path": "QMEM_CHROMA_PATH",    # path for local Chroma persistence
+    # Backend selection:
+    "vector_store": "QMEM_VECTOR_STORE",   # qdrant | chroma
+    "chroma_path": "QMEM_CHROMA_PATH",     # path for local Chroma persistence
+    # NEW: cache backend selection:
+    "cache_backend": "QMEM_CACHE_BACKEND", # local | redis
 }
 
 
@@ -73,15 +75,21 @@ class QMemConfig(BaseModel):
       - QMEM_DEFAULT_COLLECTION
       - QMEM_VECTOR_STORE     (qdrant|chroma)
       - QMEM_CHROMA_PATH
+      - QMEM_CACHE_BACKEND    (local|redis)
     """
 
-    # Backend selection
+    # Vector store backend selection
     vector_store: Literal["qdrant", "chroma"] = Field(
         default="qdrant", description="Vector store backend (qdrant | chroma)"
     )
     chroma_path: Optional[str] = Field(
         default=None,
         description="Local path for Chroma persistent client (defaults to ./.qmem/chroma)",
+    )
+
+    # Cache backend selection (NEW)
+    cache_backend: Literal["local", "redis"] = Field(
+        default="local", description="Cache backend (local | redis)"
     )
 
     # Services (Qdrant fields are required only when using Qdrant)
@@ -124,6 +132,7 @@ class QMemConfig(BaseModel):
             "QMemConfig("
             f"vector_store={self.vector_store!r}, "
             f"chroma_path={self.chroma_path!r}, "
+            f"cache_backend={self.cache_backend!r}, "
             f"qdrant_url={self.qdrant_url!r}, "
             f"qdrant_api_key={_mask(self.qdrant_api_key)!r}, "
             f"openai_api_key={_mask(self.openai_api_key)!r}, "
@@ -181,6 +190,10 @@ class QMemConfig(BaseModel):
         if not merged.get("chroma_path"):
             merged["chroma_path"] = str((CONFIG_DIR / "chroma").resolve())
 
+        # NEW: default cache backend to 'local' if missing/invalid
+        if merged.get("cache_backend") not in ("local", "redis"):
+            merged["cache_backend"] = "local"
+
         # If file missing AND required fields absent, guide user to init.
         # Embedding settings are always required.
         need_embed = any(k not in merged for k in ("embed_provider", "embed_model", "embed_dim"))
@@ -216,9 +229,11 @@ class QMemConfig(BaseModel):
 
         doc = toml.document()
 
-        # Backend
+        # Backends
         doc.add("vector_store", self.vector_store)
         doc.add("chroma_path", chroma_path)
+        # NEW: persist cache backend
+        doc.add("cache_backend", self.cache_backend)
 
         # Services
         doc.add("qdrant_url", self.qdrant_url or "http://localhost:6333")
