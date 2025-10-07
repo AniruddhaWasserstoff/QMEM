@@ -27,7 +27,7 @@ logger = log.getLogger(__name__)
 # =============================================================================
 class _QMemQdrant:
     """Minimal client for ingest & retrieval against a single Qdrant collection."""
-
+    
     # -----------------------------
     # Init
     # -----------------------------
