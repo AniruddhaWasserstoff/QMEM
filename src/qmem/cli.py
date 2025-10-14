@@ -101,20 +101,17 @@ def _truncate(s: object, limit: int = 80) -> str:
     text = "" if s is None else str(s)
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
-
 # default annotation helpers
 def _used_default(val, default) -> bool:
     return val == default
 
-
 def _ann(val, default) -> str:
     return " (default)" if _used_default(val, default) else ""
-
 
 # save filters for reuse
 def _save_filter_to_file(filter_obj: dict, name: Optional[str] = None) -> Path:
     """
-    Save filter JSON to ./.qmem/filters/<name>.json.
+    Save filter JSON next to the active config, under <cwd>/.qmem/filters/<name>.json.
     If name is omitted/blank, uses 'latest.json'.
     """
     FILTERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -123,7 +120,6 @@ def _save_filter_to_file(filter_obj: dict, name: Optional[str] = None) -> Path:
     path = FILTERS_DIR / f"{safe}.json"
     path.write_text(json.dumps(filter_obj, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
-
 
 # -----------------------------
 # Filter Builder helpers
@@ -221,7 +217,6 @@ def _ask_condition(group_name: str) -> dict:
         }
 
     return {}
-
 
 def _build_filter_interactive() -> dict:
     filter_obj: Dict[str, list] = {}
@@ -541,7 +536,6 @@ def ingest(
         f"(embed_field={embed_field}, embedded text [bold]stored[/bold] in payload)."
     )
 
-
 # -----------------------------
 # retrieve (dynamic columns via prompt)
 # -----------------------------
@@ -599,23 +593,25 @@ def retrieve(
 
     for i, r in enumerate(results, 1):
         payload = r.payload or {}
-        row = [str(i), f"{r.score:.4f}"] + [str(payload.get(k, "")).replace("\n", " ") for k in show_keys]
+        row = [str(i), f"{r.score:.4f}"] + [
+            str(payload.get(col, "")).replace("\n", " ") for col in show_keys
+        ]
         table.add_row(*row)
 
     console.print(table)
-
 
 # -----------------------------
 # Friendly Qdrant 400 parsing
 # -----------------------------
 
-_INDEX_ERR_RE = re.compile(
-    r'Index required but not found for\s+\\"(?P<field>[^"]+)\\"\s+of one of the following types:\s+\[(?P<types>[^\]]+)\]',
+_index_err_re = re.compile(
+    # Allow quoted or unquoted field names; simpler escaping
+    r'Index required but not found for\s+["\']?(?P<field>[^"\']+)["\']?\s+of one of the following types:\s+\[(?P<types>[^\]]+)\]',
     re.IGNORECASE,
 )
 
 def _maybe_hint_create_index(error_msg: str) -> None:
-    m = _INDEX_ERR_RE.search(error_msg or "")
+    m = _index_err_re.search(error_msg or "")
     if not m:
         return
     field = m.group("field").strip()
@@ -625,7 +621,6 @@ def _maybe_hint_create_index(error_msg: str) -> None:
         f"Run: [bold]qmem index[/bold] and add field [bold]{field}[/bold] with type "
         f"[bold]{' / '.join(types)}[/bold]."
     )
-
 
 # -----------------------------
 # filter (payload-only) — prompts for columns
@@ -651,6 +646,7 @@ def filter_cmd() -> None:
         console.print(f"[green]Saved filter[/green] → {saved_path}")
 
     try:
+        # FIX: actually apply the built payload filter
         results, _ = q.scroll_filter(query_filter=filter_json, limit=limit)
     except Exception as e:
         msg = str(e)
@@ -681,11 +677,10 @@ def filter_cmd() -> None:
 
     for i, r in enumerate(results, 1):
         payload = r.payload or {}
-        row = [str(i)] + [str(payload.get(k, "")).replace("\n", " ") for k in show_keys]
+        row = [str(i)] + [str(payload.get(col, "")).replace("\n", " ") for col in show_keys]
         table.add_row(*row)
 
     console.print(table)
-
 
 # -----------------------------
 # retrieve_filter (hybrid) — prompts for columns
@@ -750,64 +745,10 @@ def retrieve_filter_cmd() -> None:
 
     for i, r in enumerate(results, 1):
         payload = r.payload or {}
-        row = [str(i)] + [str(payload.get(k, "")).replace("\n", " ") for k in show_keys]
+        row = [str(i)] + [str(payload.get(col, "")).replace("\n", " ") for col in show_keys]
         table.add_row(*row)
 
     console.print(table)
-
-
-# -----------------------------
-# index (interactive payload index creation)
-# -----------------------------
-
-@app.command("index", help="Create payload indexes (Qdrant only; Chroma doesn't require indexes)")
-def index_cmd() -> None:
-    """
-    Interactively create Qdrant payload indexes for fields you plan to filter on.
-    Types supported here: keyword | integer | float | bool
-    """
-    cfg = QMemConfig.load(CONFIG_PATH)
-    collection = Prompt.ask("collection_name")
-    q = QMem(cfg, collection=collection)
-
-    if getattr(q, "_backend", "qdrant") == "chroma":
-        console.print("[yellow]Chroma backend selected — no payload indexes are required or supported.[/yellow]")
-        raise typer.Exit(code=0)
-
-    _ensure_collection_exists(q, collection)
-
-    console.print("Add fields to index. Leave name empty to finish.", style="bold")
-
-    schema: Dict[str, str] = {}
-    type_choices = ["keyword", "integer", "float", "bool"]
-    while True:
-        fname = Prompt.ask("Field name (blank to finish)", default="", show_default=False).strip()
-        if not fname:
-            break
-        itype = qs.select(
-            f"Index type for '{fname}':",
-            choices=type_choices,
-            pointer="➤",
-            use_shortcuts=False,
-        ).ask()
-        schema[fname] = itype
-
-    if not schema:
-        _fail("No fields provided.")
-
-    created = []
-    for field, ftype in schema.items():
-        try:
-            q.create_payload_index(field_name=field, field_type=ftype)
-            created.append(field)
-        except Exception as e:
-            console.print(f"[yellow]Skipped[/yellow] {field}: {e}")
-
-    if created:
-        console.print(f"[green]Created/verified indexes[/green] on {collection}: {', '.join(created)}")
-    else:
-        console.print(f"[yellow]No new indexes created[/yellow] on {collection}.")
-
 
 # -----------------------------
 # mongo (mirror an existing collection → MongoDB)
@@ -878,3 +819,310 @@ def mongo_cmd() -> None:
     console.print(
         f"[green]Mirrored[/green] {total} documents to Mongo (db={mongo_db}, coll={mongo_coll})."
     )
+
+# =============================
+# Letta integration + Chatbot
+# =============================
+
+# We import here to avoid hard-dependency issues during base CLI operations
+import os as _os
+import sys as _sys
+import shutil as _shutil
+import subprocess as _subprocess
+import webbrowser as _webbrowser
+import time as _time
+from rich import print as _rprint
+import os
+
+# Letta client import (SDK)
+try:
+    from letta_client import Letta as _Letta
+    from letta_client.errors import UnprocessableEntityError as _UnprocessableEntityError
+    _HAVE_LETTA = True
+except Exception:
+    _HAVE_LETTA = False
+
+# QMem-backed Letta tools
+try:
+    from qmem.letta_tools import (
+        QMemInsertTool as _QMemInsertTool,
+        QMemSearchTool as _QMemSearchTool,
+    )
+except Exception:
+    _QMemInsertTool = None
+    _QMemSearchTool = None
+
+def _require_letta():
+    if not _HAVE_LETTA:
+        _rprint("[red]letta-client is unavailable. Reinstall qmem or ensure dependencies are installed.[/red]")
+        raise typer.Exit(code=2)
+
+def _ensure_env_default(key: str, default: str) -> str:
+    if not _os.environ.get(key):
+        _os.environ[key] = default
+    return _os.environ[key]
+
+def _warn_if_not_qdrant():
+    cfg = QMemConfig.load(CONFIG_PATH)
+    backend = (getattr(cfg, "vector_store", "qdrant") or "qdrant").lower()
+    if backend != "qdrant":
+        _rprint(f"[yellow]Warning:[/yellow] QMem backend is '{backend}'. Archival writes will NOT go to Qdrant. "
+                "Run `qmem init` here or export QMEM_VECTOR_STORE=qdrant, QMEM_QDRANT_URL, QMEM_QDRANT_API_KEY.")
+
+def _upsert_qmem_archival_agent(client: "_Letta") -> str:
+    """Create (or find) an agent that mirrors `letta_demo` tool config and return its id."""
+    name = "qmem-archival-agent"
+    system = (
+        "When the user says 'remember ...' with no qualifier, interpret it as a request "
+        "for long-term archival memory. ALWAYS and EXCLUSIVELY call the tool `archival_memory_insert` "
+        "(QMem) to persist it. Use only temporary/session memory if the user explicitly says "
+        "'temporary' or 'scratchpad'. When the user states profile facts (e.g., 'my name is X'), call `archival_memory_insert` with content exactly like 'my name is X'."
+    )
+    tools = [
+        "send_message",
+        "conversation_search",
+        "archival_memory_insert",
+        "archival_memory_search",
+    ]
+
+    # Try to find an existing agent with same name
+    try:
+        existing = client.agents.list()
+        for a in existing or []:
+            if getattr(a, "name", "") == name:
+                return getattr(a, "id", None) or a.get("id")  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    # Create new if not found
+    agent = client.agents.create(
+        name=name,
+        model=os.environ.get("LETTA_MODEL", "letta/letta-free"),
+        embedding=os.environ.get("LETTA_EMBEDDING", "letta/letta-free"),
+        include_base_tools=False,  # CHANGED: do not include base tools to avoid generic memory_insert
+        tools=tools,
+        system=system,
+        memory_blocks=[{"label":"persona","value":"I use QMem for long-term memory."}],
+        enable_sleeptime=False,
+    )
+    return getattr(agent, "id", None) or agent.get("id")  # type: ignore[attr-defined]
+
+@app.command("letta-register-tools")
+def letta_register_tools(base_url: Optional[str] = None, token: Optional[str] = None):
+    """Register QMem archival tools with a running Letta server (no alias tools)."""
+    _require_letta()
+    if _QMemInsertTool is None or _QMemSearchTool is None:
+        console.print("[red]Could not import qmem.letta_tools. Ensure src/qmem/letta_tools.py exists.[/red]")
+        raise typer.Exit(code=2)
+
+    base_url = base_url or _ensure_env_default("LETTA_BASE_URL", "http://localhost:8283")
+    token = token or _os.environ.get("LETTA_TOKEN")
+
+    # Construct client (Bearer token if provided)
+    client = _Letta(base_url=base_url, token=token) if token else _Letta(base_url=base_url)
+
+    # Register tools (idempotent)
+    try:
+        client.tools.add(tool=_QMemInsertTool())
+        client.tools.add(tool=_QMemSearchTool())
+    except Exception as e:
+        _rprint(f"[red]Failed to register tools:[/red] {e}")
+        _rprint("• Is the Letta server running at", base_url, "?")
+        _rprint("• If secured, export LETTA_TOKEN before running this command.")
+        raise typer.Exit(code=2)
+
+    _rprint(f"[bold green]Registered[/] QMem archival tools at {base_url}")
+
+@app.command("letta-demo")
+def letta_demo():
+    """Create an agent + quick smoke test (requires local Letta server)."""
+    _require_letta()
+    base_url = _ensure_env_default("LETTA_BASE_URL", "http://localhost:8283")
+    token = _os.environ.get("LETTA_TOKEN")
+    client = _Letta(base_url=base_url, token=token) if token else _Letta(base_url=base_url)
+
+    # idempotent tool registration
+    client.tools.add(tool=_QMemInsertTool())
+    client.tools.add(tool=_QMemSearchTool())
+
+    # NOTE: Newer Letta builds require using the 'letta' provider handle.
+    try:
+        agent = client.agents.create(
+            model=os.environ.get("LETTA_MODEL", "letta/letta-free"),
+            embedding=os.environ.get("LETTA_EMBEDDING", "letta/letta-free"),
+            include_base_tools=False,  # CHANGED
+            tools=[
+                "send_message",
+                "conversation_search",
+                "archival_memory_insert",
+                "archival_memory_search",
+            ],
+            system=(
+                "When the user says 'remember ...' with no qualifier, interpret it as a request "
+                "for long-term archival memory. ALWAYS and EXCLUSIVELY call the tool `archival_memory_insert` "
+                "(QMem) to persist it. Use only temporary/session memory if the user explicitly says "
+                "'temporary' or 'scratchpad'. When the user states profile facts (e.g., 'my name is X'), call `archival_memory_insert` with content exactly like 'my name is X'."
+            ),
+            memory_blocks=[{"label":"persona","value":"I use QMem for long-term memory."}],
+            enable_sleeptime=False,
+        )
+    except _UnprocessableEntityError as e:
+        _rprint("[yellow]Agent create validation failed, retrying with base tools only...[/yellow]", e)
+        agent = client.agents.create(
+            model=os.environ.get("LETTA_MODEL", "letta/letta-free"),
+            embedding=os.environ.get("LETTA_EMBEDDING", "letta/letta-free"),
+            include_base_tools=False,  # CHANGED
+            tools=[
+                "send_message",
+                "conversation_search",
+                "archival_memory_insert",
+                "archival_memory_search",
+            ],
+            system=(
+                "When the user says 'remember ...' with no qualifier, interpret it as a request "
+                "for long-term archival memory. ALWAYS and EXCLUSIVELY call the tool `archival_memory_insert` "
+                "(QMem) to persist it. Use only temporary/session memory if the user explicitly says "
+                "'temporary' or 'scratchpad'. When the user states profile facts (e.g., 'my name is X'), call `archival_memory_insert` with content exactly like 'my name is X'."
+            ),
+            memory_blocks=[{"label":"persona","value":"I use QMem for long-term memory."}],
+            enable_sleeptime=False,
+        )
+    _rprint("Agent:", getattr(agent, "id", "(unknown)"))
+
+    # Quick local test of the tool functions
+    _QMemInsertTool().run(content="The default build target is release mode.")
+    out = _QMemSearchTool().run(query="What is the build target?", k=3)
+    _rprint("[bold cyan]QMem search:[/]", out or "(no hits)")
+
+@app.command("chatbot")
+def chatbot():
+    """
+    Start the Letta Chatbot Template and force it to use the same QMem archival tools as `letta-demo`:
+      - Registers QMem archival tools on the running Letta server
+      - Creates (or reuses) a server-side agent with those tools
+      - Exposes NEXT_PUBLIC_DEFAULT_AGENT_ID so the UI attaches to that agent (no agent creation from UI)
+    """
+    # Require Node & npm & git
+    for exe in ("node", "npm", "git"):
+        if _shutil.which(exe) is None:
+            console.print(f"[red]{exe} not found. Please install Node.js (>=18), npm, and git.[/red]")
+            raise typer.Exit(code=2)
+
+    _warn_if_not_qdrant()
+
+    base_url = _ensure_env_default("LETTA_BASE_URL", "http://localhost:8283")
+
+    # --- Ensure tools are registered BEFORE the UI starts, and create a server agent ---
+    if _HAVE_LETTA and _QMemInsertTool is not None and _QMemSearchTool is not None:
+        token = _os.environ.get("LETTA_TOKEN")
+        client = _Letta(base_url=base_url, token=token) if token else _Letta(base_url=base_url)
+        try:
+            client.tools.add(tool=_QMemInsertTool())
+            client.tools.add(tool=_QMemSearchTool())
+            _rprint("[green]QMem archival tools registered with Letta server.[/green]")
+        except Exception as e:
+            _rprint("[yellow]Warning:[/yellow] Could not register archival tools automatically:", e)
+            _rprint("You can run `qmem letta-register-tools` in another terminal.")
+            raise typer.Exit(code=2)
+
+        # Upsert the qmem-archival-agent on the server (mirrors letta_demo)
+        try:
+            agent_id = _upsert_qmem_archival_agent(client)
+            _rprint(f"[green]Using server agent:[/green] {agent_id}")
+        except Exception as e:
+            _rprint("[red]Failed to create/find server agent:[/red]", e)
+            raise typer.Exit(code=2)
+    else:
+        _rprint("[red]letta-client or qmem.letta_tools missing; cannot register tools or create agent.[/red]")
+        raise typer.Exit(code=2)
+
+    # IMPORTANT: Keep assets beside the **current** ./.qmem (not in home)
+    project_root_dotqmem = CONFIG_PATH.parent  # typically <cwd>/.qmem
+    app_dir = project_root_dotqmem / "letta-chatbot"
+    repo = "https://github.com/letta-ai/letta-chatbot-template.git"
+    app_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    # Clone or pull
+    if not app_dir.exists():
+        console.print("[bold]Cloning Letta Chatbot Template...[/bold]")
+        _subprocess.run(["git", "clone", repo, str(app_dir)], check=True)
+    else:
+        console.print("[bold]Updating Letta Chatbot Template...[/bold]")
+        try:
+            _subprocess.run(["git", "-C", str(app_dir), "pull", "--rebase"], check=True)
+        except Exception:
+            console.print("[yellow]Git pull failed (local changes?). Continuing with existing tree.[/yellow]")
+
+    # Write .env (pin to our server agent; prevent UI from creating different agents)
+    env_lines = [
+        f"LETTA_BASE_URL={base_url}",
+        f"NEXT_PUBLIC_DEFAULT_AGENT_ID={agent_id}",
+        "NEXT_PUBLIC_CREATE_AGENTS_FROM_UI=false",
+        "USE_COOKIE_BASED_AUTHENTICATION=false",
+    ]
+    token = _os.environ.get("LETTA_TOKEN")
+    if token:
+        env_lines.append(f"LETTA_TOKEN={token}")
+    (app_dir / ".env").write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+
+    # Also keep a default-agent.json around (not used when DEFAULT_AGENT_ID is set), matching letta_demo
+    agent_json = {
+        "model": "" + os.environ.get("LETTA_MODEL", "letta/letta-free") + "",
+        "embedding": "" + os.environ.get("LETTA_EMBEDDING", "letta/letta-free") + "",
+        "include_base_tools": False,  # CHANGED
+        "tools": [
+            "send_message",
+            "conversation_search",
+            "archival_memory_insert",
+            "archival_memory_search",
+        ],
+        "system": (
+            "When the user says 'remember ...' with no qualifier, interpret it as a request "
+            "for long-term archival memory. ALWAYS and EXCLUSIVELY call the tool `archival_memory_insert` "
+            "(QMem) to persist it. Use only temporary/session memory if the user explicitly says "
+            "'temporary' or 'scratchpad'. When the user states profile facts (e.g., 'my name is X'), call `archival_memory_insert` with content exactly like 'my name is X'."
+        ),
+        "memory_blocks": [
+            {"label": "persona", "value": "I am a helpful chatbot with QMem long-term memory."}
+        ],
+        "enable_sleeptime": False
+    }
+    (app_dir / "default-agent.json").write_text(json.dumps(agent_json, indent=2), encoding="utf-8")
+
+    # npm install (first run) with retry fallback
+    if not (app_dir / "node_modules").exists():
+        console.print("[bold]Installing npm deps (first run)...[/bold]")
+        try:
+            _subprocess.run(["npm", "install"], cwd=str(app_dir), check=True)
+        except Exception:
+            console.print("[yellow]npm install failed; retrying without optional deps & scripts…[/yellow]")
+            env = dict(_os.environ)
+            env["CYPRESS_INSTALL_BINARY"] = "0"
+            _subprocess.run(
+                ["npm", "install", "--no-optional", "--ignore-scripts"],
+                cwd=str(app_dir),
+                check=True,
+                env=env,
+            )
+
+    # Start dev server and open browser
+    console.print("[bold green]Starting Letta Chatbot on http://localhost:3000[/bold green]")
+
+    def _open():
+        _time.sleep(1.5)
+        try:
+            _webbrowser.open("http://localhost:3000")
+        except Exception:
+            pass
+
+    try:
+        if hasattr(_os, "fork"):
+            if _os.fork() == 0:
+                _open()
+                _os._exit(0)
+        else:
+            _open()
+    except Exception:
+        _open()
+
+    _subprocess.run(["npm", "run", "dev"], cwd=str(app_dir), check=False)

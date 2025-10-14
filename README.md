@@ -16,7 +16,7 @@ It is designed for directness and utility, offering a guided CLI for interactive
 - Search text by semantic meaning, not just exact words  
 - Apply filters to narrow search results  
 - Choose embeddings from OpenAI, Gemini, Voyage, or MiniLM  
-- MongoDB integration for analytics  
+- MongoDB integration for analytics
 
 ---
 
