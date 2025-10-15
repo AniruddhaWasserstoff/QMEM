@@ -883,6 +883,10 @@ def _upsert_qmem_archival_agent(client: "_Letta") -> str:
         "conversation_search",
         "archival_memory_insert",
         "archival_memory_search",
+        "memory_insert",
+        "memory_replace",
+        "memory_rethink",
+        "memory_finish_edits",
     ]
 
     # Try to find an existing agent with same name
@@ -956,6 +960,10 @@ def letta_demo():
                 "conversation_search",
                 "archival_memory_insert",
                 "archival_memory_search",
+                "memory_insert",
+                "memory_replace",   
+                "memory_rethink",
+                "memory_finish_edits",
             ],
             system=(
                 "When the user says 'remember ...' with no qualifier, interpret it as a request "
@@ -977,6 +985,10 @@ def letta_demo():
                 "conversation_search",
                 "archival_memory_insert",
                 "archival_memory_search",
+                "memory_insert",
+                "memory_replace",
+                "memory_rethink",
+                "memory_finish_edits",
             ],
             system=(
                 "When the user says 'remember ...' with no qualifier, interpret it as a request "
@@ -1075,6 +1087,10 @@ def chatbot():
             "conversation_search",
             "archival_memory_insert",
             "archival_memory_search",
+            "memory_insert",
+            "memory_replace",
+            "memory_rethink",
+            "memory_finish_edits",
         ],
         "system": (
             "When the user says 'remember ...' with no qualifier, interpret it as a request "

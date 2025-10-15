@@ -30,6 +30,7 @@ venv.bak/
 .idea/
 *.swp
 *.swo
+ingest.md
 
 # ---------------------
 # Project-specific
