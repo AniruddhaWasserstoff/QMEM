@@ -1,108 +1,42 @@
-# import qmem as qm
-
-# # Create a collection
-# qm.create(collection_name="testing", dim=1024, distance_metric="cosine")
-
-# # Ingest data from a fill
-# qm.ingest(
-#     file="/home/aniruddha/Desktop/qmem/data.jsonl",
-#     embed_field="query", # optional, keep these fields in payload
-#     #payload_field=""
-# )
-
-# #Retrieve results (pretty table by default)
-# table = qm.retrieve(
-#     query="who is batman",
-#     top_k=100,
-#     collection_name="testing",   
-#     show=["description", "title"]            
-# )
-# print(table)
-
-
-# table = qm.retrieve_filter(
-#     query="who is batman ",
-#     filter_json=".qmem/filters/latest.json",
-#     top_k=10,
-#     collection_name="testing",
-#     show=["description", "title"]
-# )
-# print(table)
-
-# mirrored = qm.mongo(
-#     collection_name="testing",            # your existing Qdrant collection
-#     mongo_uri="mongodb://127.0.0.1:27017",     # your local Mongo
-#     mongo_db="final_test_db",                # DB name you want in Mongo
-#     mongo_collection="final_test",           # collection name in Mongo
-#     fields=["description", "title"]
-#     # batch_size=1000,                         # optional: Qdrant scroll page size
-#     # max_docs=None,                           # optional: cap how many docs to mirror
-# )
-# print("Done")
-
-
-
-
 import qmem as qm
 
-# 1. Create a collection
+# Create a collection
 qm.create(collection_name="testing", dim=1024, distance_metric="cosine")
 
-# 2. Ingest data
+
+# Ingest data from a fill
 qm.ingest(
-    collection_name="testing",
-    file="/home/aniruddha/Desktop/qmem/data.jsonl",
-    embed_field="query",
+    file="data.jsonl",
+    embed_field="query", # optional, keep these fields in payload
+    #payload_field=""
 )
 
-# 3. Retrieve — first time (expect MISS_DB)
-print("First call:")
-table1 = qm.retrieve(
+#Retrieve results (pretty table by default)
+table = qm.retrieve(
     query="who is batman",
-    top_k=5,
-    collection_name="testing",
-    show=["description", "title"]
+    top_k=100,
+    collection_name="testing",   
+    show=["description", "title"]            
 )
-print(table1)
+print(table)
 
-# 4. Retrieve — same query again (expect HIT_EXACT)
-print("\nSecond call (exact same query):")
-table2 = qm.retrieve(
-    query="who is batman",
-    top_k=5,
-    collection_name="testing",
-    show=["description", "title"]
-)
-print(table2)
 
-# 5. Retrieve — paraphrase (may HIT_SEM if similarity high enough)
-print("\nThird call (paraphrase):")
-table3 = qm.retrieve(
-    query="tell me about batman",
-    top_k=5,
-    collection_name="testing",
-    show=["description", "title"]
-)
-print(table3)
-
-# 6. Filtered retrieval — first run (expect MISS_DB)
-print("\nFiltered call (first run):")
-table4 = qm.retrieve_filter(
-    query="who is batman",
-    filter_json=".qmem/filters/latest.json",  # make sure you have a filter file saved
-    top_k=5,
-    collection_name="testing",
-    show=["description", "title"]
-)
-print(table4)
-
-# 7. Filtered retrieval — second run (expect HIT_EXACT)
-print("\nFiltered call (repeat):")
-table5 = qm.retrieve_filter(
-    query="who is batman",
+table = qm.retrieve_filter(
+    query="who is batman ",
     filter_json=".qmem/filters/latest.json",
-    top_k=5,
+    top_k=10,
     collection_name="testing",
     show=["description", "title"]
 )
-print(table5)
+print(table)
+
+mirrored = qm.mongo(
+    collection_name="qwerty",            # your existing Qdrant collection
+    mongo_uri="mongodb://127.0.0.1:27017",     # your local Mongo
+    mongo_db="qwerty_test_db",                # DB name you want in Mongo
+    mongo_collection="qwerty_test",           # collection name in Mongo
+    fields=["description", "title"]
+    # batch_size=1000,                         # optional: Qdrant scroll page size
+    # max_docs=None,                           # optional: cap how many docs to mirror
+)
+print("Done")
